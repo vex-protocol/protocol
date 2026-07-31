@@ -27,10 +27,16 @@ const {
     DevicePayloadSchema: devicePayload,
     EmojiSchema: emoji,
     FileSQLSchema: fileSQL,
+    FederationMigrationAuthorizationSchema: migrationAuthorization,
+    FederationMigrationChallengeSchema: migrationChallenge,
+    FederationMigrationImportRequestSchema: migrationImportRequest,
+    FederationMigrationImportResultSchema: migrationImportResult,
+    FederationMigrationPrepareResultSchema: migrationPrepareResult,
     InviteSchema: invite,
     PasswordUpdatePayloadSchema: passwordUpdatePayload,
     PermissionSchema: permission,
     RegistrationPayloadSchema: registrationPayload,
+    RegistryBytes32Schema: registryBytes32,
     ServerSchema: server,
     UserSchema: user,
 } = await import("../src/schemas/index.js");
@@ -51,6 +57,11 @@ registry.register("ActionToken", actionToken);
 registry.register("DevicePayload", devicePayload);
 registry.register("RegistrationPayload", registrationPayload);
 registry.register("PasswordUpdatePayload", passwordUpdatePayload);
+registry.register("MigrationAuthorization", migrationAuthorization);
+registry.register("MigrationChallenge", migrationChallenge);
+registry.register("MigrationImportRequest", migrationImportRequest);
+registry.register("MigrationImportResult", migrationImportResult);
+registry.register("MigrationPrepareResult", migrationPrepareResult);
 
 // ── Common parameters ───────────────────────────────────────────────────────
 
@@ -382,6 +393,97 @@ registry.registerPath({
     },
 });
 
+// ── Homeserver migration ───────────────────────────────────────────────────
+
+registry.registerPath({
+    method: "post",
+    path: "/migration/challenge",
+    operationId: "requestHomeserverMigrationChallenge",
+    summary: "Request a homeserver migration challenge",
+    description:
+        "Create a short-lived challenge that the authenticated device must sign before this homeserver prepares portable account data.",
+    tags: ["migration"],
+    security: [{ [bearerAuth.name]: [] }],
+    request: {
+        body: {
+            content: {
+                "application/msgpack": {
+                    schema: z.object({
+                        destinationHomeserverId: registryBytes32,
+                    }),
+                },
+            },
+        },
+    },
+    responses: {
+        200: {
+            description: "Device-signing challenge issued",
+            content: {
+                "application/msgpack": { schema: migrationChallenge },
+            },
+        },
+        403: { description: "Account or device is not active locally" },
+        404: { description: "Destination homeserver is not registered" },
+    },
+});
+
+registry.registerPath({
+    method: "post",
+    path: "/migration/prepare",
+    operationId: "prepareHomeserverMigration",
+    summary: "Authorize a homeserver migration",
+    description:
+        "Verify the device-signed challenge and retain a time-limited source transfer. Portable state is frozen only after the finalized registry route moves to the destination.",
+    tags: ["migration"],
+    security: [{ [bearerAuth.name]: [] }],
+    request: {
+        body: {
+            content: {
+                "application/msgpack": { schema: migrationAuthorization },
+            },
+        },
+    },
+    responses: {
+        200: {
+            description: "Migration transfer prepared",
+            content: {
+                "application/msgpack": { schema: migrationPrepareResult },
+            },
+        },
+        403: { description: "Authorization or device signature is invalid" },
+        409: { description: "Authorization nonce conflicts with prior use" },
+    },
+});
+
+registry.registerPath({
+    method: "post",
+    path: "/migration/import",
+    operationId: "importHomeserverMigration",
+    summary: "Import portable account state",
+    description:
+        "Import authoritative room references, encrypted attachments, queued ciphertext, and the public avatar from the previous homeserver after the registry route is finalized.",
+    tags: ["migration"],
+    security: [{ [bearerAuth.name]: [] }],
+    request: {
+        body: {
+            content: {
+                "application/msgpack": { schema: migrationImportRequest },
+            },
+        },
+    },
+    responses: {
+        200: {
+            description: "Portable state import result",
+            content: {
+                "application/msgpack": { schema: migrationImportResult },
+            },
+        },
+        403: { description: "Account or device is not active locally" },
+        409: { description: "Finalized route or migration state is invalid" },
+        502: { description: "Source homeserver returned invalid data" },
+    },
+});
+
 // ── Servers ──────────────────────────────────────────────────────────────────
 
 registry.registerPath({
@@ -572,6 +674,7 @@ registry.registerPath({
                     schema: z.object({
                         dbReady: z.boolean(),
                         ok: z.boolean(),
+                        registryReady: z.boolean(),
                     }),
                 },
             },
@@ -615,6 +718,10 @@ const doc = generator.generateDocument({
         { name: "servers", description: "Chat servers and channels" },
         { name: "channels", description: "Channel operations" },
         { name: "invites", description: "Server invitations" },
+        {
+            name: "migration",
+            description: "Device-authorized homeserver migration",
+        },
         { name: "health", description: "Health and readiness checks" },
     ],
 });

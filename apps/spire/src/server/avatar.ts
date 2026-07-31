@@ -4,6 +4,8 @@
  * Commercial licenses available at vex.wtf
  */
 
+import type { FederationService } from "../federation/FederationService.ts";
+
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
 
@@ -15,10 +17,11 @@ import { fileTypeFromBuffer, fileTypeFromFile } from "file-type";
 import multer from "multer";
 import { z } from "zod/v4";
 
+import { ALLOWED_IMAGE_TYPES } from "./imageTypes.ts";
 import { uploadLimiter } from "./rateLimit.ts";
 import { getParam, getUser } from "./utils.ts";
 
-import { ALLOWED_IMAGE_TYPES, protect } from "./index.ts";
+import { protect } from "./index.ts";
 
 const safePathParam = z.string().regex(/^[a-zA-Z0-9._-]+$/);
 const MAX_AVATAR_BYTES = 5 * 1024 * 1024;
@@ -37,7 +40,7 @@ const avatarJsonPayload = z.object({
         .max(Math.ceil((MAX_AVATAR_BYTES * 4) / 3) + 4),
 });
 
-export const getAvatarRouter = () => {
+export const getAvatarRouter = (federation?: FederationService) => {
     const router = express.Router();
 
     router.get("/:userID", async (req, res) => {
@@ -49,7 +52,23 @@ export const getAvatarRouter = () => {
         const filePath = "./avatars/" + safeId.data;
         const typeDetails = await fileTypeFromFile(filePath).catch(() => null);
         if (!typeDetails) {
-            res.sendStatus(404);
+            if (!federation) {
+                res.sendStatus(404);
+                return;
+            }
+            try {
+                const avatar = await federation.retrieveAvatar(safeId.data);
+                if (!avatar) {
+                    res.sendStatus(404);
+                    return;
+                }
+                res.set("Content-type", avatar.contentType);
+                res.set("Cache-control", "public, max-age=300");
+                res.set("Cross-Origin-Resource-Policy", "cross-origin");
+                res.send(Buffer.from(avatar.data));
+            } catch {
+                res.sendStatus(502);
+            }
             return;
         }
         res.set("Content-type", typeDetails.mime);

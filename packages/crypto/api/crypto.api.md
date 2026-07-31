@@ -10,6 +10,35 @@ import { decode as decode_2 } from '@stablelib/utf8';
 import { default as ed2curve_2 } from 'ed2curve';
 import { encode } from '@stablelib/utf8';
 import { encode as encode_2 } from '@stablelib/base64';
+import type { FederationMigrationAuthorizationInput } from '@vex-chat/types';
+
+// @public
+export interface EvmNameRegistrarContext {
+    // (undocumented)
+    chainId: bigint | number;
+    // (undocumented)
+    registrarAddress: string | Uint8Array;
+}
+
+// @public
+export interface EvmRegistryAccountAction {
+    // (undocumented)
+    accountId: Uint8Array;
+    // (undocumented)
+    deadline: bigint | number;
+    // (undocumented)
+    epoch: bigint | number;
+    // (undocumented)
+    nonce: bigint | number;
+}
+
+// @public
+export interface EvmRegistryContext {
+    // (undocumented)
+    chainId: bigint | number;
+    // (undocumented)
+    registryAddress: string | Uint8Array;
+}
 
 // @public
 export interface KeyPair {
@@ -63,6 +92,9 @@ export function xDHAsync(myPrivateKey: Uint8Array, theirPublicKey: Uint8Array): 
 export function xEncode(curveType: "X448" | "X25519", publicKey: Uint8Array): Uint8Array;
 
 // @public
+export function xFederationMigrationAuthorizationDigest(input: FederationMigrationAuthorizationInput): Uint8Array;
+
+// @public
 export function xHash(data: Uint8Array): string;
 
 // @public
@@ -87,10 +119,98 @@ export function xMessageKeySubkeys(messageKey: Uint8Array): {
 export function xMnemonic(entropy: Uint8Array, wordList?: string[]): string;
 
 // @public
+export function xNameCommitment(context: EvmNameRegistrarContext, input: {
+    accountId: Uint8Array;
+    committerAddress: string | Uint8Array;
+    nameHash: Uint8Array;
+    salt: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xNameHash(username: string): Uint8Array;
+
+// @public
+export function xNameRegistrationDigest(context: EvmNameRegistrarContext, input: {
+    accountId: Uint8Array;
+    deadline: bigint | number;
+    nameHash: Uint8Array;
+    nonce: bigint | number;
+    registryEpoch: bigint | number;
+}): Uint8Array;
+
+// @public
 export function xPreKeySignaturePayload(publicKey: Uint8Array, kind: "one-time" | "signed"): Uint8Array;
 
 // @public
 export function xRandomBytes(length: number): Uint8Array;
+
+// @public
+export function xRegistryAccountId(genesisNonce: Uint8Array, genesisDeviceKey: Uint8Array): Uint8Array;
+
+// @public
+export function xRegistryAddDeviceDigest(context: EvmRegistryContext, input: EvmRegistryAccountAction & {
+    newDeviceKey: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xRegistryHomeserverId(genesisNonce: Uint8Array, signingKey: Uint8Array): Uint8Array;
+
+// @public
+export function xRegistryRegisterAccountDigest(context: EvmRegistryContext, input: {
+    accountId: Uint8Array;
+    deadline: bigint | number;
+    genesisDeviceKey: Uint8Array;
+    genesisNonce: Uint8Array;
+    homeserverId: Uint8Array;
+    recoveryCommitment: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xRegistryRegisterHomeserverDigest(context: EvmRegistryContext, input: {
+    deadline: bigint | number;
+    endpoint: string;
+    genesisNonce: Uint8Array;
+    homeserverId: Uint8Array;
+    signingKey: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xRegistryRevokeDeviceDigest(context: EvmRegistryContext, input: EvmRegistryAccountAction & {
+    deviceKey: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xRegistryRotateHomeserverKeyDigest(context: EvmRegistryContext, input: {
+    deadline: bigint | number;
+    epoch: bigint | number;
+    homeserverId: Uint8Array;
+    newSigningKey: Uint8Array;
+    nonce: bigint | number;
+}): Uint8Array;
+
+// @public
+export function xRegistrySetDeviceThresholdDigest(context: EvmRegistryContext, input: EvmRegistryAccountAction & {
+    threshold: number;
+}): Uint8Array;
+
+// @public
+export function xRegistrySetHomeserverDigest(context: EvmRegistryContext, input: EvmRegistryAccountAction & {
+    homeserverId: Uint8Array;
+}): Uint8Array;
+
+// @public
+export function xRegistrySetHomeserverEndpointDigest(context: EvmRegistryContext, input: {
+    deadline: bigint | number;
+    endpoint: string;
+    epoch: bigint | number;
+    homeserverId: Uint8Array;
+    nonce: bigint | number;
+}): Uint8Array;
+
+// @public
+export function xRegistrySetRecoveryCommitmentDigest(context: EvmRegistryContext, input: EvmRegistryAccountAction & {
+    recoveryCommitment: Uint8Array;
+}): Uint8Array;
 
 // @public
 export function xSecretbox(plaintext: Uint8Array, nonce: Uint8Array, key: Uint8Array): Uint8Array;
@@ -111,6 +231,12 @@ export function xSign(message: Uint8Array, secretKey: Uint8Array): Uint8Array;
 export function xSignAsync(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array>;
 
 // @public
+export function xSignDetached(message: Uint8Array, secretKey: Uint8Array): Uint8Array;
+
+// @public
+export function xSignDetachedAsync(message: Uint8Array, secretKey: Uint8Array): Promise<Uint8Array>;
+
+// @public
 export function xSignKeyPair(): KeyPair;
 
 // @public
@@ -127,6 +253,12 @@ export function xSignOpen(signedMessage: Uint8Array, publicKey: Uint8Array): nul
 
 // @public
 export function xSignOpenAsync(signedMessage: Uint8Array, publicKey: Uint8Array): Promise<null | Uint8Array>;
+
+// @public
+export function xSignVerifyDetached(message: Uint8Array, signature: Uint8Array, publicKey: Uint8Array): boolean;
+
+// @public
+export function xSignVerifyDetachedAsync(message: Uint8Array, signature: Uint8Array, publicKey: Uint8Array): Promise<boolean>;
 
 // @public
 export class XUtils {

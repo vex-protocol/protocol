@@ -25,6 +25,7 @@ export type {
     Message,
     Messages,
     MessageSendOptions,
+    Migration,
     Moderation,
     NotificationSubscription,
     NotificationSubscriptionInput,

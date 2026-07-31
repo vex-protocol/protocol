@@ -38,7 +38,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-Compose builds the image (context: monorepo root, dockerfile: `apps/spire/Dockerfile`), starts Spire with a persistent **`spire-data`** volume mounted at `/data` (SQLite + `files/`, `avatars/`, `emoji/`), and fronts it with **nginx** on host **port 16777**. Runtime keys and passkey settings come from `apps/spire/.env` via Compose `env_file`; they are intentionally not copied into the Docker image.
+Compose builds the image (context: monorepo root, dockerfile: `apps/spire/Dockerfile`), starts Spire with a persistent **`spire-data`** volume mounted at `/data` (SQLite + `files/`, `avatars/`, `emoji/`, and `server-icons/`), and fronts it with **nginx** on host **port 16777**. Runtime keys and passkey settings come from `apps/spire/.env` via Compose `env_file`; they are intentionally not copied into the Docker image.
 
 ## Running without Docker
 
@@ -78,6 +78,36 @@ Spire reads configuration from environment variables. **Docker Compose:** put th
 | `SPIRE_TRUST_PROXY_HOPS` | `0`        | Number of trusted reverse-proxy hops. Set `1` for the bundled single-nginx topology. This must match the real network path so clients cannot spoof `X-Forwarded-For` to evade IP rate limits.                                                                                                                                                                                                      |
 | `DEV_API_KEY`            | _(empty)_  | When set, requests that send header `x-dev-api-key` with the same value (constant-time compare) **skip in-process rate limiters**. The same gate enables **`GET /status/process`** (404 without a valid key): a small JSON snapshot of the Spire Node process (PID, uptime, `memoryUsage`, cumulative `resourceUsage`, WebSocket client count). Dev / load-testing only — never set in production. |
 | `CANARY`                 | _(unset)_  |                                                                                                                                                                                                                                                                                                                                                                                                    |
+
+### Identity registry and federation
+
+Registry-backed identity and federation are enabled together. When disabled,
+Spire retains its standalone behavior. When enabled, account registration,
+sessions, device authority, remote identity lookup, rooms, mail routing, and
+homeserver migration are checked against finalized registry state.
+
+| Variable                                   | Default     | Description                                                                                                 |
+| ------------------------------------------ | ----------- | ----------------------------------------------------------------------------------------------------------- |
+| `SPIRE_REGISTRY_ENABLED`                   | `false`     | Set `true` to enable finalized registry identity and federation.                                            |
+| `SPIRE_REGISTRY_CHAIN_ID`                  | required    | Positive EVM chain ID.                                                                                      |
+| `SPIRE_REGISTRY_CONTRACT`                  | required    | Checksummed or lowercase registry contract address.                                                         |
+| `SPIRE_REGISTRAR_CONTRACT`                 | _(empty)_   | Optional paid-name registrar address.                                                                       |
+| `SPIRE_REGISTRY_DEPLOYMENT_BLOCK`          | required    | Registry deployment block used for deterministic cache rebuilds.                                            |
+| `SPIRE_REGISTRY_RPC_URLS`                  | required    | Comma-separated HTTPS RPC origins used for failover. Production still requires verified provider agreement. |
+| `SPIRE_REGISTRY_FINALITY`                  | `finalized` | `finalized` or `confirmations:<count>`.                                                                     |
+| `SPIRE_REGISTRY_MAX_BLOCK_RANGE`           | `2000`      | Maximum log range fetched per index pass.                                                                   |
+| `SPIRE_REGISTRY_POLL_INTERVAL_MS`          | `12000`     | Registry poll interval, at least 1000 ms.                                                                   |
+| `SPIRE_REGISTRY_MAX_STALENESS_MS`          | `>=60000`   | Maximum time since a successful finalized sync before registry-authoritative operations fail closed.        |
+| `SPIRE_HOMESERVER_ID`                      | required    | Canonical lowercase `0x`-prefixed 32-byte homeserver ID.                                                    |
+| `SPIRE_FEDERATION_ALLOW_PRIVATE_ADDRESSES` | `false`     | Allows private/loopback federation DNS targets for local integration tests only. Never enable publicly.     |
+
+The registered endpoint must be a bare HTTPS origin and its Ed25519 signing key
+must match `SPK`. Until the first finalized cache position is available, and
+whenever successful sync exceeds the configured staleness window, Spire fails
+closed for registry-authoritative operations. Connected device sockets are
+reauthorized against that state every minute. See
+[federation v1](../../docs/architecture/federation-v1.md) and the
+[EVM registry deployment gates](../../docs/architecture/evm-registry-v1.md).
 
 ### Passkeys / WebAuthn
 

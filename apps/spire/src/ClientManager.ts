@@ -6,6 +6,7 @@
 
 import type { CallManager } from "./CallManager.ts";
 import type { Database } from "./Database.ts";
+import type { FederationService } from "./federation/FederationService.ts";
 import type {
     BaseMsg,
     ChallMsg,
@@ -67,6 +68,7 @@ const MAX_MSG_SIZE = 64 * 1024;
 // couldn't run, and we'd kill the socket out from under the user.
 const MAX_MISSED_PONGS = 3;
 const PING_INTERVAL_MS = 5000;
+const FEDERATION_REAUTH_INTERVAL_MS = 60_000;
 
 export class ClientManager extends EventEmitter {
     private alive: boolean = true;
@@ -77,6 +79,8 @@ export class ClientManager extends EventEmitter {
     private db: Database;
     private device: Device | null;
     private failed: boolean = false;
+    private federation: FederationService | null;
+    private lastFederationAuthorizationAt = 0;
     private missedPongs: number = 0;
     private notify: (
         userID: string,
@@ -104,6 +108,7 @@ export class ClientManager extends EventEmitter {
             mailNonce?: Uint8Array,
         ) => void,
         userDetails: User,
+        federation?: FederationService,
     ) {
         super();
         this.conn = ws;
@@ -112,6 +117,7 @@ export class ClientManager extends EventEmitter {
         this.user = null;
         this.userDetails = userDetails;
         this.device = null;
+        this.federation = federation ?? null;
         this.notify = notify;
 
         this.initListeners();
@@ -173,6 +179,9 @@ export class ClientManager extends EventEmitter {
 
     private authorize(transmissionID: string) {
         this.authed = true;
+        if (this.federation) {
+            this.lastFederationAuthorizationAt = Date.now();
+        }
         this.sendAuthedMessage(transmissionID);
         void this.db.markDeviceLogin(this.getDevice());
         this.emit("authed");
@@ -276,7 +285,10 @@ export class ClientManager extends EventEmitter {
                     break;
                 case "response":
                     // eslint-disable-next-line @typescript-eslint/no-unsafe-type-assertion -- narrowed by msg.type
-                    void this.verifyResponse(msg as RespMsg);
+                    void this.verifyResponse(msg as RespMsg).catch(() => {
+                        this.sendAuthError(SocketAuthErrors.InvalidToken);
+                        this.fail();
+                    });
                     break;
                 default:
                     break;
@@ -319,6 +331,16 @@ export class ClientManager extends EventEmitter {
                     const mail = mailResult.data;
 
                     try {
+                        if (this.federation) {
+                            await this.federation.deliverMail(
+                                header,
+                                mail,
+                                this.getDevice(),
+                                this.getUser().userID,
+                            );
+                            this.sendSuccess(msg.transmissionID, null);
+                            return;
+                        }
                         const { recipientDevice } = await validateMailIngress(
                             this.db,
                             mail,
@@ -343,7 +365,10 @@ export class ClientManager extends EventEmitter {
                             mail.nonce,
                         );
                     } catch (err: unknown) {
-                        this.sendErr(msg.transmissionID, String(err));
+                        this.sendErr(
+                            msg.transmissionID,
+                            err instanceof Error ? err.message : String(err),
+                        );
                     }
                 }
                 break;
@@ -371,6 +396,7 @@ export class ClientManager extends EventEmitter {
 
     private async pingLoop() {
         while (!this.failed) {
+            if (!(await this.reauthorizeFederatedSession(Date.now()))) return;
             this.ping();
             await sleep(PING_INTERVAL_MS);
         }
@@ -384,6 +410,39 @@ export class ClientManager extends EventEmitter {
 
         const p = { transmissionID, type: "pong" };
         this.send(p);
+    }
+
+    private async reauthorizeFederatedSession(now: number): Promise<boolean> {
+        if (
+            !this.federation ||
+            !this.authed ||
+            now - this.lastFederationAuthorizationAt <
+                FEDERATION_REAUTH_INTERVAL_MS
+        ) {
+            return true;
+        }
+        if (!this.user || !this.device) {
+            this.fail();
+            return false;
+        }
+        try {
+            if (
+                !(await this.federation.authorizeLocalSession(
+                    this.user.userID,
+                    this.device,
+                ))
+            ) {
+                this.sendAuthError(SocketAuthErrors.InvalidToken);
+                this.fail();
+                return false;
+            }
+            this.lastFederationAuthorizationAt = now;
+            return true;
+        } catch {
+            this.sendAuthError(SocketAuthErrors.InvalidToken);
+            this.fail();
+            return false;
+        }
     }
 
     private sendAuthedMessage(transmissionID: string) {
@@ -445,6 +504,19 @@ export class ClientManager extends EventEmitter {
             }
             if (!message) {
                 this.sendAuthError(SocketAuthErrors.BadSignature);
+                this.fail();
+                return;
+            }
+            if (
+                this.federation &&
+                this.device &&
+                !(await this.federation.authorizeLocalSession(
+                    user.userID,
+                    this.device,
+                ))
+            ) {
+                this.device = null;
+                this.sendAuthError(SocketAuthErrors.InvalidToken);
                 this.fail();
                 return;
             }

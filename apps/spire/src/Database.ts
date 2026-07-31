@@ -19,6 +19,8 @@ import type {
     Device,
     DevicePayload,
     Emoji,
+    FederationRoomDeletion,
+    FederationRoomSnapshot,
     FileSQL,
     Invite,
     KeyBundle,
@@ -57,6 +59,40 @@ import {
 import argon2 from "argon2";
 
 import { serverMailRetentionCutoffIso } from "./mailRetention.ts";
+import { RegistryStore } from "./registry/RegistryStore.ts";
+
+export interface FederationRoomOutboxEntry {
+    attempts: number;
+    createdAt: number;
+    destinationHomeserverId: string;
+    eventId: string;
+    kind: "deletion" | "snapshot";
+    nextAttemptAt: number;
+    payload: string;
+}
+
+export interface FederationRoomTombstone {
+    deletedAt: number;
+    homeserverId: string;
+    permanent: boolean;
+    revision: string;
+    serverId: string;
+}
+
+export interface StoredHomeserverMigration {
+    accountId: string;
+    authorization: string;
+    completedAt: null | number;
+    createdAt: number;
+    destinationHomeserverId: string;
+    deviceKey: string;
+    mailCutoffAt: null | number;
+    manifest: null | string;
+    migrationId: string;
+    nonce: string;
+    sourceHomeserverId: string;
+    transferExpiresAt: number;
+}
 
 export interface StoreSubscriptionUpsertInput {
     environment: BillingEnvironment;
@@ -96,7 +132,11 @@ function parseMailType(n: number): MailType {
 
 import BetterSqlite3 from "better-sqlite3";
 import { Kysely, Migrator, sql, SqliteDialect } from "kysely";
-import { stringify as uuidStringify, validate as uuidValidate } from "uuid";
+import {
+    parse as uuidParse,
+    stringify as uuidStringify,
+    validate as uuidValidate,
+} from "uuid";
 
 export const MAX_ACTIVE_DEVICES_PER_USER = 20;
 
@@ -156,6 +196,7 @@ function isMigration(mod: unknown): mod is Migration {
 }
 
 const pubkeyRegex = /^(?:[0-9a-fA-F]{2}){32,4096}$/;
+const accountIdRegex = /^0x[0-9a-fA-F]{64}$/;
 const DUMMY_PASSWORD_HASH =
     "$argon2id$v=19$m=65536,t=3,p=1$SZlCYiWwt450ZWt2zRvDIw$QZdY/EtG81hEAXYRLVDvqtpJbajXL1/QRM91ZT9DQPk";
 const ARGON2_OPTIONS = {
@@ -260,9 +301,55 @@ export class Database extends EventEmitter {
         void this.init();
     }
 
+    public async applyFederatedRoomDeletion(
+        deletion: FederationRoomDeletion,
+        deletedAt = Date.now(),
+    ): Promise<boolean> {
+        return this.applyFederatedRoomAbsence(
+            {
+                homeserverId: deletion.originHomeserverId,
+                revision: deletion.revision,
+                serverId: deletion.serverId,
+            },
+            true,
+            deletedAt,
+        );
+    }
+
+    public async bumpServerRevision(serverID: string): Promise<string> {
+        return this.incrementServerRevision(this.db, serverID);
+    }
+
     public async close(): Promise<void> {
         this.emojiListByServerCache.clear();
         await this.db.destroy();
+    }
+
+    public async completeFederationRoomOutbox(eventId: string): Promise<void> {
+        await this.db
+            .deleteFrom("federation_room_outbox")
+            .where("eventId", "=", eventId)
+            .execute();
+    }
+
+    public async consumeFederationNonce(
+        originHomeserverId: string,
+        nonce: string,
+        expiresAt: number,
+        now = Date.now(),
+    ): Promise<boolean> {
+        return this.db.transaction().execute(async (transaction) => {
+            await transaction
+                .deleteFrom("federation_nonces")
+                .where("expiresAt", "<=", now)
+                .execute();
+            const result = await transaction
+                .insertInto("federation_nonces")
+                .values({ expiresAt, nonce, originHomeserverId })
+                .onConflict((conflict) => conflict.doNothing())
+                .executeTakeFirst();
+            return result.numInsertedOrUpdatedRows === 1n;
+        });
     }
 
     public async createChannel(
@@ -274,7 +361,10 @@ export class Database extends EventEmitter {
             name,
             serverID,
         };
-        await this.db.insertInto("channels").values(channel).execute();
+        await this.db.transaction().execute(async (transaction) => {
+            await transaction.insertInto("channels").values(channel).execute();
+            await this.incrementServerRevision(transaction, serverID);
+        });
         return channel;
     }
 
@@ -297,6 +387,33 @@ export class Database extends EventEmitter {
 
     public async createFile(file: FileSQL): Promise<void> {
         await this.db.insertInto("files").values(file).execute();
+    }
+
+    public async createHomeserverMigration(
+        migration: Omit<
+            StoredHomeserverMigration,
+            "completedAt" | "mailCutoffAt"
+        >,
+    ): Promise<StoredHomeserverMigration> {
+        return this.db.transaction().execute(async (transaction) => {
+            const row: StoredHomeserverMigration = {
+                ...migration,
+                completedAt: null,
+                mailCutoffAt: null,
+            };
+            await transaction
+                .insertInto("homeserver_migrations")
+                .values(row)
+                .onConflict((conflict) => conflict.column("nonce").doNothing())
+                .execute();
+            const stored = await transaction
+                .selectFrom("homeserver_migrations")
+                .selectAll()
+                .where("nonce", "=", migration.nonce)
+                .executeTakeFirst();
+            if (!stored) throw new Error("Homeserver migration disappeared.");
+            return stored;
+        });
     }
 
     public async createInvite(
@@ -389,37 +506,69 @@ export class Database extends EventEmitter {
             };
 
             await trx.insertInto("permissions").values(permission).execute();
+            if (resourceType === "server") {
+                await this.incrementServerRevision(trx, resourceID);
+            }
             return permission;
         });
     }
 
-    public async createServer(name: string, ownerID: string): Promise<Server> {
+    public createRegistryStore(source: string): RegistryStore {
+        return new RegistryStore(this.db, source);
+    }
+
+    public async createServer(
+        name: string,
+        ownerID: string,
+        homeserverId?: string,
+    ): Promise<Server> {
         // create the server
         const server: Server = {
+            ...(homeserverId ? { homeserverId } : {}),
             name,
+            revision: "1",
             serverID: crypto.randomUUID(),
         };
-        await this.db
-            .insertInto("servers")
-            .values({
-                icon: server.icon ?? null,
-                name: server.name,
-                serverID: server.serverID,
-            })
-            .execute();
-        // create the admin permission
-        await this.createPermission(ownerID, "server", server.serverID, 100);
-        // create the general channel
-        await this.createChannel("general", server.serverID);
+        await this.db.transaction().execute(async (transaction) => {
+            await transaction
+                .insertInto("servers")
+                .values({
+                    homeserverId: server.homeserverId ?? null,
+                    icon: null,
+                    name: server.name,
+                    revision: 1,
+                    serverID: server.serverID,
+                })
+                .execute();
+            await transaction
+                .insertInto("permissions")
+                .values({
+                    permissionID: crypto.randomUUID(),
+                    powerLevel: 100,
+                    resourceID: server.serverID,
+                    resourceType: "server",
+                    userID: ownerID,
+                })
+                .execute();
+            await transaction
+                .insertInto("channels")
+                .values({
+                    channelID: crypto.randomUUID(),
+                    name: "general",
+                    serverID: server.serverID,
+                })
+                .execute();
+        });
         return server;
     }
 
     public async createUser(
         regKey: Uint8Array,
         regPayload: RegistrationPayload,
+        registryAccountId?: string,
     ): Promise<[null | UserRecord, Error | null]> {
         try {
-            const userID = uuidStringify(regKey);
+            const userID = registryAccountId ?? uuidStringify(regKey);
             const username = normalizeRegistrationUsername(regPayload.username);
             if (
                 typeof regPayload.password !== "string" ||
@@ -463,15 +612,20 @@ export class Database extends EventEmitter {
     }
 
     public async deleteChannel(channelID: string): Promise<void> {
-        await this.deletePermissions(channelID);
-        await this.db
-            .deleteFrom("mail")
-            .where("group", "=", channelID)
-            .execute();
-        await this.db
-            .deleteFrom("channels")
-            .where("channelID", "=", channelID)
-            .execute();
+        await this.db.transaction().execute(async (transaction) => {
+            await transaction
+                .deleteFrom("permissions")
+                .where("resourceID", "=", channelID)
+                .execute();
+            await transaction
+                .deleteFrom("mail")
+                .where("group", "=", mailGroupForChannel(channelID))
+                .execute();
+            await transaction
+                .deleteFrom("channels")
+                .where("channelID", "=", channelID)
+                .execute();
+        });
     }
 
     /** Delete a channel while preserving the invariant that a server has one. */
@@ -502,12 +656,13 @@ export class Database extends EventEmitter {
                 .execute();
             await trx
                 .deleteFrom("mail")
-                .where("group", "=", channelID)
+                .where("group", "=", mailGroupForChannel(channelID))
                 .execute();
             await trx
                 .deleteFrom("channels")
                 .where("channelID", "=", channelID)
                 .execute();
+            await this.incrementServerRevision(trx, channel.serverID);
             return true;
         });
     }
@@ -564,7 +719,15 @@ export class Database extends EventEmitter {
         await this.db
             .deleteFrom("mail")
             .where("nonce", "=", XUtils.encodeHex(nonce))
-            .where("recipient", "=", userID)
+            .where((expression) =>
+                expression.or([
+                    expression("deliveryDeviceID", "=", userID),
+                    expression.and([
+                        expression("deliveryDeviceID", "is", null),
+                        expression("recipient", "=", userID),
+                    ]),
+                ]),
+            )
             .execute();
     }
 
@@ -576,10 +739,24 @@ export class Database extends EventEmitter {
     }
 
     public async deletePermission(permissionID: string): Promise<void> {
-        await this.db
-            .deleteFrom("permissions")
-            .where("permissionID", "=", permissionID)
-            .execute();
+        await this.db.transaction().execute(async (transaction) => {
+            const permission = await transaction
+                .selectFrom("permissions")
+                .selectAll()
+                .where("permissionID", "=", permissionID)
+                .executeTakeFirst();
+            if (!permission) return;
+            await transaction
+                .deleteFrom("permissions")
+                .where("permissionID", "=", permissionID)
+                .execute();
+            if (permission.resourceType === "server") {
+                await this.incrementServerRevision(
+                    transaction,
+                    permission.resourceID,
+                );
+            }
+        });
     }
 
     public async deletePermissions(resourceID: string): Promise<void> {
@@ -590,14 +767,33 @@ export class Database extends EventEmitter {
     }
 
     public async deleteServer(serverID: string): Promise<void> {
-        await this.deletePermissions(serverID);
-        const channels = await this.retrieveChannels(serverID);
-        for (const channel of channels) {
-            await this.deleteChannel(channel.channelID);
-        }
         await this.db
-            .deleteFrom("servers")
-            .where("serverID", "=", serverID)
+            .transaction()
+            .execute((transaction) =>
+                this.deleteServerInTransaction(transaction, serverID),
+            );
+        this.emojiListByServerCache.delete(serverID);
+    }
+
+    public async enqueueFederationRoomOutbox(
+        entry: Omit<FederationRoomOutboxEntry, "attempts">,
+    ): Promise<void> {
+        await this.db
+            .insertInto("federation_room_outbox")
+            .values({ ...entry, attempts: 0 })
+            .onConflict((conflict) => conflict.column("eventId").doNothing())
+            .execute();
+    }
+
+    public async failFederationRoomOutbox(
+        eventId: string,
+        attempts: number,
+        nextAttemptAt: number,
+    ): Promise<void> {
+        await this.db
+            .updateTable("federation_room_outbox")
+            .set({ attempts, nextAttemptAt })
+            .where("eventId", "=", eventId)
             .execute();
     }
 
@@ -762,7 +958,15 @@ export class Database extends EventEmitter {
             .selectFrom("mail")
             .select("nonce")
             .where("nonce", "=", XUtils.encodeHex(nonce))
-            .where("recipient", "=", deviceID)
+            .where((expression) =>
+                expression.or([
+                    expression("deliveryDeviceID", "=", deviceID),
+                    expression.and([
+                        expression("deliveryDeviceID", "is", null),
+                        expression("recipient", "=", deviceID),
+                    ]),
+                ]),
+            )
             .limit(1)
             .executeTakeFirst();
         return row !== undefined;
@@ -779,6 +983,28 @@ export class Database extends EventEmitter {
             })
             .where("metric_key", "=", "requests_total")
             .execute();
+    }
+
+    public async initializeHomeserverMigrationManifest(
+        migrationId: string,
+        manifest: string,
+        mailCutoffAt: number,
+    ): Promise<StoredHomeserverMigration> {
+        return this.db.transaction().execute(async (transaction) => {
+            await transaction
+                .updateTable("homeserver_migrations")
+                .set({ mailCutoffAt, manifest })
+                .where("migrationId", "=", migrationId)
+                .where("manifest", "is", null)
+                .execute();
+            const row = await transaction
+                .selectFrom("homeserver_migrations")
+                .selectAll()
+                .where("migrationId", "=", migrationId)
+                .executeTakeFirst();
+            if (!row) throw new Error("Homeserver migration disappeared.");
+            return row;
+        });
     }
 
     public async isDevicePasskeyApproved(
@@ -1028,6 +1254,17 @@ export class Database extends EventEmitter {
             .execute();
     }
 
+    public async removeFederatedRoomMirror(
+        marker: {
+            homeserverId: string;
+            revision: string;
+            serverId: string;
+        },
+        removedAt = Date.now(),
+    ): Promise<boolean> {
+        return this.applyFederatedRoomAbsence(marker, false, removedAt);
+    }
+
     public async removeNotificationSubscription(args: {
         deviceID: string;
         subscriptionID: string;
@@ -1208,6 +1445,41 @@ export class Database extends EventEmitter {
         return rows.map((r) => ({ ...r }));
     }
 
+    public async retrieveFederationRoomOutbox(
+        now: number,
+        limit = 50,
+    ): Promise<FederationRoomOutboxEntry[]> {
+        const rows = await this.db
+            .selectFrom("federation_room_outbox")
+            .selectAll()
+            .where("nextAttemptAt", "<=", now)
+            .orderBy("createdAt", "asc")
+            .limit(limit)
+            .execute();
+        return rows.flatMap((row) =>
+            row.kind === "deletion" || row.kind === "snapshot"
+                ? [{ ...row, kind: row.kind }]
+                : [],
+        );
+    }
+
+    public async retrieveFederationRoomTombstone(
+        serverId: string,
+    ): Promise<FederationRoomTombstone | null> {
+        const row = await this.db
+            .selectFrom("federation_room_tombstones")
+            .selectAll()
+            .where("serverId", "=", serverId)
+            .executeTakeFirst();
+        return row
+            ? {
+                  ...row,
+                  permanent: row.permanent === 1,
+                  revision: String(row.revision),
+              }
+            : null;
+    }
+
     public async retrieveFile(fileID: string): Promise<FileSQL | null> {
         const file = await this.db
             .selectFrom("files")
@@ -1215,6 +1487,16 @@ export class Database extends EventEmitter {
             .where("fileID", "=", fileID)
             .execute();
         return file[0] ?? null;
+    }
+
+    public async retrieveFilesByOwners(ownerIDs: string[]): Promise<FileSQL[]> {
+        if (ownerIDs.length === 0) return [];
+        return this.db
+            .selectFrom("files")
+            .selectAll()
+            .where("owner", "in", ownerIDs)
+            .orderBy("fileID")
+            .execute();
     }
 
     public async retrieveGroupMembers(
@@ -1241,6 +1523,18 @@ export class Database extends EventEmitter {
         return groupMembers;
     }
 
+    public async retrieveHomeserverMigration(
+        migrationId: string,
+    ): Promise<null | StoredHomeserverMigration> {
+        return (
+            (await this.db
+                .selectFrom("homeserver_migrations")
+                .selectAll()
+                .where("migrationId", "=", migrationId)
+                .executeTakeFirst()) ?? null
+        );
+    }
+
     public async retrieveInvite(inviteID: string): Promise<Invite | null> {
         const rows = await this.db
             .selectFrom("invites")
@@ -1257,7 +1551,15 @@ export class Database extends EventEmitter {
         const rawRows = await this.db
             .selectFrom("mail")
             .selectAll()
-            .where("recipient", "=", deviceID)
+            .where((expression) =>
+                expression.or([
+                    expression("deliveryDeviceID", "=", deviceID),
+                    expression.and([
+                        expression("deliveryDeviceID", "is", null),
+                        expression("recipient", "=", deviceID),
+                    ]),
+                ]),
+            )
             .where("time", ">=", cutoff)
             .orderBy("time", "asc")
             .orderBy("sender", "asc")
@@ -1289,6 +1591,75 @@ export class Database extends EventEmitter {
         const allMail = rows.map(fixMail);
 
         return allMail;
+    }
+
+    public async retrieveMigrationDevices(
+        accountId: string,
+    ): Promise<Device[]> {
+        const rows = await this.db
+            .selectFrom("devices")
+            .selectAll()
+            .where("owner", "=", accountId)
+            .execute();
+        return rows.map(toDevice);
+    }
+
+    public async retrieveMigrationMail(
+        accountId: string,
+        recipientDeviceIds: string[],
+        createdBefore: string,
+        offset: number,
+        limit: number,
+    ): Promise<
+        {
+            deliveryDeviceId: string;
+            header: Uint8Array;
+            mail: MailWS;
+            time: string;
+        }[]
+    > {
+        if (recipientDeviceIds.length === 0) return [];
+        const rows = await this.db
+            .selectFrom("mail")
+            .selectAll()
+            .where("readerID", "=", accountId)
+            .where((expression) =>
+                expression.or([
+                    expression("deliveryDeviceID", "in", recipientDeviceIds),
+                    expression.and([
+                        expression("deliveryDeviceID", "is", null),
+                        expression("recipient", "in", recipientDeviceIds),
+                    ]),
+                ]),
+            )
+            .where("time", ">=", serverMailRetentionCutoffIso())
+            .where("time", "<=", createdBefore)
+            .orderBy("time", "asc")
+            .orderBy("mailID", "asc")
+            .offset(offset)
+            .limit(limit)
+            .execute();
+        return rows.map((row) => {
+            const mail = toMailSQL(row);
+            return {
+                deliveryDeviceId: row.deliveryDeviceID ?? mail.recipient,
+                header: XUtils.decodeHex(mail.header),
+                mail: {
+                    authorID: mail.authorID,
+                    cipher: XUtils.decodeHex(mail.cipher),
+                    extra: XUtils.decodeHex(mail.extra),
+                    forward: mail.forward,
+                    group: mail.group ? XUtils.decodeHex(mail.group) : null,
+                    mailID: mail.mailID,
+                    mailType: mail.mailType,
+                    nonce: XUtils.decodeHex(mail.nonce),
+                    readerID: mail.readerID,
+                    recipient: mail.recipient,
+                    sender: mail.sender,
+                },
+                time: mail.time,
+            };
+        });
     }
 
     public async retrieveNotificationSubscriptions(args: {
@@ -1405,6 +1776,34 @@ export class Database extends EventEmitter {
             .execute();
     }
 
+    public async retrieveRoomSnapshot(
+        serverID: string,
+    ): Promise<FederationRoomSnapshot | null> {
+        const server = await this.retrieveServer(serverID);
+        if (!server?.homeserverId || !server.revision) return null;
+        const [channels, permissions] = await Promise.all([
+            this.retrieveChannels(serverID),
+            this.retrievePermissionsByResourceID(serverID),
+        ]);
+        const members = new Map<string, Permission>();
+        for (const permission of permissions) {
+            const current = members.get(permission.userID);
+            if (!current || current.powerLevel < permission.powerLevel) {
+                members.set(permission.userID, permission);
+            }
+        }
+        return {
+            channels,
+            members: [...members.values()].map((permission) => ({
+                permissionId: permission.permissionID,
+                powerLevel: permission.powerLevel,
+                userId: permission.userID,
+            })),
+            revision: server.revision,
+            server,
+        };
+    }
+
     public async retrieveServer(serverID: string): Promise<null | Server> {
         const rows = await this.db
             .selectFrom("servers")
@@ -1413,6 +1812,16 @@ export class Database extends EventEmitter {
             .limit(1)
             .execute();
         const row = rows[0];
+        return row ? toServer(row) : null;
+    }
+
+    public async retrieveServerByIcon(icon: string): Promise<null | Server> {
+        const row = await this.db
+            .selectFrom("servers")
+            .selectAll()
+            .where("icon", "=", icon)
+            .limit(1)
+            .executeTakeFirst();
         return row ? toServer(row) : null;
     }
 
@@ -1539,11 +1948,20 @@ export class Database extends EventEmitter {
         userIdentifier: string,
     ): Promise<InternalUserRecord | null> {
         let rows;
-        if (uuidValidate(userIdentifier)) {
+        if (
+            uuidValidate(userIdentifier) ||
+            accountIdRegex.test(userIdentifier)
+        ) {
             rows = await this.db
                 .selectFrom("users")
                 .selectAll()
-                .where("userID", "=", userIdentifier)
+                .where(
+                    "userID",
+                    "=",
+                    accountIdRegex.test(userIdentifier)
+                        ? userIdentifier.toLowerCase()
+                        : userIdentifier,
+                )
                 .limit(1)
                 .execute();
         } else {
@@ -1579,6 +1997,143 @@ export class Database extends EventEmitter {
     public async retrieveUsers(): Promise<InternalUserRecord[]> {
         const rows = await this.db.selectFrom("users").selectAll().execute();
         return rows.map(toUserRecord);
+    }
+
+    public async saveFederatedMail(
+        mail: MailWS,
+        header: Uint8Array,
+    ): Promise<boolean> {
+        const entry = this.mailSqlEntry(
+            mail,
+            header,
+            mail.sender,
+            mail.authorID,
+        );
+        const result = await this.db
+            .insertInto("mail")
+            .values({
+                ...entry,
+                forward: entry.forward ? 1 : 0,
+                time: entry.time,
+            })
+            .onConflict((conflict) => conflict.column("nonce").doNothing())
+            .executeTakeFirst();
+        return result.numInsertedOrUpdatedRows === 1n;
+    }
+
+    public async saveFederatedRoom(
+        snapshot: FederationRoomSnapshot,
+        permission: Permission,
+    ): Promise<void> {
+        const { homeserverId, revision } = snapshot.server;
+        if (!homeserverId || !revision) {
+            throw new Error("Federated room authority is missing.");
+        }
+        if (
+            permission.resourceType !== "server" ||
+            permission.resourceID !== snapshot.server.serverID ||
+            snapshot.members.find(
+                (member) => member.userId === permission.userID,
+            )?.permissionId !== permission.permissionID ||
+            snapshot.members.find(
+                (member) => member.userId === permission.userID,
+            )?.powerLevel !== permission.powerLevel
+        ) {
+            throw new Error(
+                "Federated room permission does not match the server.",
+            );
+        }
+        const incomingRevision = Number(revision);
+        if (!Number.isSafeInteger(incomingRevision) || incomingRevision < 1) {
+            throw new Error("Federated room revision is invalid.");
+        }
+
+        await this.db.transaction().execute(async (transaction) => {
+            const tombstone = await transaction
+                .selectFrom("federation_room_tombstones")
+                .selectAll()
+                .where("serverId", "=", snapshot.server.serverID)
+                .executeTakeFirst();
+            if (tombstone) {
+                if (tombstone.homeserverId !== homeserverId) {
+                    throw new Error(
+                        "Federated room tombstone authority changed.",
+                    );
+                }
+                if (tombstone.permanent === 1) {
+                    throw new Error("Federated room was permanently deleted.");
+                }
+                if (incomingRevision <= tombstone.revision) return;
+            }
+            const existingServer = await transaction
+                .selectFrom("servers")
+                .selectAll()
+                .where("serverID", "=", snapshot.server.serverID)
+                .executeTakeFirst();
+            if (
+                existingServer &&
+                existingServer.homeserverId !== homeserverId
+            ) {
+                throw new Error(
+                    "Federated room authority cannot change off-chain.",
+                );
+            }
+            const shouldApplySnapshot =
+                !existingServer || existingServer.revision < incomingRevision;
+            if (!shouldApplySnapshot) return;
+            if (tombstone) {
+                await transaction
+                    .deleteFrom("federation_room_tombstones")
+                    .where("serverId", "=", snapshot.server.serverID)
+                    .execute();
+            }
+            await transaction
+                .insertInto("servers")
+                .values({
+                    homeserverId,
+                    icon: snapshot.server.icon ?? null,
+                    name: snapshot.server.name,
+                    revision: incomingRevision,
+                    serverID: snapshot.server.serverID,
+                })
+                .onConflict((conflict) =>
+                    conflict.column("serverID").doUpdateSet({
+                        homeserverId,
+                        icon: snapshot.server.icon ?? null,
+                        name: snapshot.server.name,
+                        revision: incomingRevision,
+                    }),
+                )
+                .execute();
+            await transaction
+                .deleteFrom("channels")
+                .where("serverID", "=", snapshot.server.serverID)
+                .execute();
+            if (snapshot.channels.length > 0) {
+                await transaction
+                    .insertInto("channels")
+                    .values(snapshot.channels)
+                    .execute();
+            }
+
+            await transaction
+                .deleteFrom("permissions")
+                .where("resourceType", "=", "server")
+                .where("resourceID", "=", snapshot.server.serverID)
+                .execute();
+            await transaction
+                .insertInto("permissions")
+                .values(
+                    snapshot.members.map((member) => ({
+                        permissionID: member.permissionId,
+                        powerLevel: member.powerLevel,
+                        resourceID: snapshot.server.serverID,
+                        resourceType: "server",
+                        userID: member.userId,
+                    })),
+                )
+                .execute();
+        });
     }
 
     public async saveMail(
@@ -1628,6 +2183,28 @@ export class Database extends EventEmitter {
         });
 
         await this.db.insertInto("mail").values(values).execute();
+    }
+
+    public async saveMigratedMail(
+        mail: MailWS,
+        header: Uint8Array,
+        time: string,
+        deliveryDeviceId: string,
+    ): Promise<boolean> {
+        const entry = this.mailSqlEntry(
+            mail,
+            header,
+            mail.sender,
+            mail.authorID,
+            time,
+            deliveryDeviceId,
+        );
+        const result = await this.db
+            .insertInto("mail")
+            .values({ ...entry, forward: entry.forward ? 1 : 0 })
+            .onConflict((conflict) => conflict.column("nonce").doNothing())
+            .executeTakeFirst();
+        return result.numInsertedOrUpdatedRows === 1n;
     }
 
     public async saveNotificationSubscription(
@@ -1737,29 +2314,68 @@ export class Database extends EventEmitter {
         channelID: string,
         name: string,
     ): Promise<Channel | null> {
-        const result = await this.db
-            .updateTable("channels")
-            .set({ name })
-            .where("channelID", "=", channelID)
-            .executeTakeFirst();
-        if (Number(result.numUpdatedRows) === 0) {
-            return null;
-        }
+        const updated = await this.db
+            .transaction()
+            .execute(async (transaction) => {
+                const channel = await transaction
+                    .selectFrom("channels")
+                    .selectAll()
+                    .where("channelID", "=", channelID)
+                    .executeTakeFirst();
+                if (!channel) return false;
+                await transaction
+                    .updateTable("channels")
+                    .set({ name })
+                    .where("channelID", "=", channelID)
+                    .execute();
+                await this.incrementServerRevision(
+                    transaction,
+                    channel.serverID,
+                );
+                return true;
+            });
+        if (!updated) return null;
         return this.retrieveChannel(channelID);
+    }
+
+    public async updateHomeserverMigrationCompleted(
+        migrationId: string,
+        completedAt: number,
+    ): Promise<void> {
+        await this.db
+            .updateTable("homeserver_migrations")
+            .set({ completedAt })
+            .where("migrationId", "=", migrationId)
+            .execute();
     }
 
     public async updatePermissionPowerLevel(
         permissionID: string,
         powerLevel: number,
     ): Promise<null | Permission> {
-        const result = await this.db
-            .updateTable("permissions")
-            .set({ powerLevel })
-            .where("permissionID", "=", permissionID)
-            .executeTakeFirst();
-        if (Number(result.numUpdatedRows) === 0) {
-            return null;
-        }
+        const updated = await this.db
+            .transaction()
+            .execute(async (transaction) => {
+                const permission = await transaction
+                    .selectFrom("permissions")
+                    .selectAll()
+                    .where("permissionID", "=", permissionID)
+                    .executeTakeFirst();
+                if (!permission) return false;
+                await transaction
+                    .updateTable("permissions")
+                    .set({ powerLevel })
+                    .where("permissionID", "=", permissionID)
+                    .execute();
+                if (permission.resourceType === "server") {
+                    await this.incrementServerRevision(
+                        transaction,
+                        permission.resourceID,
+                    );
+                }
+                return true;
+            });
+        if (!updated) return null;
         return this.retrievePermission(permissionID);
     }
 
@@ -1769,13 +2385,22 @@ export class Database extends EventEmitter {
     ): Promise<null | Server> {
         const result = await this.db
             .updateTable("servers")
-            .set(update)
+            .set({ ...update, revision: sql<number>`revision + 1` })
             .where("serverID", "=", serverID)
             .executeTakeFirst();
         if (Number(result.numUpdatedRows) === 0) {
             return null;
         }
         return this.retrieveServer(serverID);
+    }
+
+    public async upsertMigratedFile(file: FileSQL): Promise<boolean> {
+        const result = await this.db
+            .insertInto("files")
+            .values(file)
+            .onConflict((conflict) => conflict.column("fileID").doNothing())
+            .executeTakeFirst();
+        return result.numInsertedOrUpdatedRows === 1n;
     }
 
     public async upsertStoreSubscription(
@@ -1839,6 +2464,128 @@ export class Database extends EventEmitter {
         return toBillingSubscription(saved);
     }
 
+    private async applyFederatedRoomAbsence(
+        marker: {
+            homeserverId: string;
+            revision: string;
+            serverId: string;
+        },
+        permanent: boolean,
+        deletedAt: number,
+    ): Promise<boolean> {
+        const incomingRevision = Number(marker.revision);
+        if (!Number.isSafeInteger(incomingRevision) || incomingRevision < 1) {
+            throw new Error("Federated room absence revision is invalid.");
+        }
+        const deleted = await this.db
+            .transaction()
+            .execute(async (transaction) => {
+                const tombstone = await transaction
+                    .selectFrom("federation_room_tombstones")
+                    .selectAll()
+                    .where("serverId", "=", marker.serverId)
+                    .executeTakeFirst();
+                if (
+                    tombstone &&
+                    tombstone.homeserverId !== marker.homeserverId
+                ) {
+                    throw new Error(
+                        "Federated room tombstone authority changed.",
+                    );
+                }
+
+                const server = await transaction
+                    .selectFrom("servers")
+                    .selectAll()
+                    .where("serverID", "=", marker.serverId)
+                    .executeTakeFirst();
+                if (server && server.homeserverId !== marker.homeserverId) {
+                    throw new Error("Federated room authority changed.");
+                }
+                const currentRevision = Math.max(
+                    server?.revision ?? 0,
+                    tombstone?.revision ?? 0,
+                );
+                if (
+                    incomingRevision <= currentRevision ||
+                    (!permanent && tombstone?.permanent === 1)
+                ) {
+                    return false;
+                }
+
+                const nextPermanent =
+                    permanent || tombstone?.permanent === 1 ? 1 : 0;
+                await transaction
+                    .insertInto("federation_room_tombstones")
+                    .values({
+                        deletedAt,
+                        homeserverId: marker.homeserverId,
+                        permanent: nextPermanent,
+                        revision: incomingRevision,
+                        serverId: marker.serverId,
+                    })
+                    .onConflict((conflict) =>
+                        conflict.column("serverId").doUpdateSet({
+                            deletedAt,
+                            permanent: nextPermanent,
+                            revision: incomingRevision,
+                        }),
+                    )
+                    .execute();
+                if (!server) return false;
+                await this.deleteServerInTransaction(
+                    transaction,
+                    marker.serverId,
+                );
+                return true;
+            });
+        if (deleted) this.emojiListByServerCache.delete(marker.serverId);
+        return deleted;
+    }
+
+    private async deleteServerInTransaction(
+        transaction: Transaction<ServerDatabase>,
+        serverID: string,
+    ): Promise<void> {
+        const channels = await transaction
+            .selectFrom("channels")
+            .select("channelID")
+            .where("serverID", "=", serverID)
+            .execute();
+        const channelIDs = channels.map((channel) => channel.channelID);
+
+        await transaction
+            .deleteFrom("permissions")
+            .where("resourceID", "=", serverID)
+            .execute();
+        if (channelIDs.length > 0) {
+            await transaction
+                .deleteFrom("permissions")
+                .where("resourceID", "in", channelIDs)
+                .execute();
+            await transaction
+                .deleteFrom("mail")
+                .where("group", "in", channelIDs.map(mailGroupForChannel))
+                .execute();
+        }
+        await transaction
+            .deleteFrom("invites")
+            .where("serverID", "=", serverID)
+            .execute();
+        await transaction
+            .deleteFrom("emojis")
+            .where("owner", "=", serverID)
+            .execute();
+        await transaction
+            .deleteFrom("channels")
+            .where("serverID", "=", serverID)
+            .execute();
+        await transaction
+            .deleteFrom("servers")
+            .where("serverID", "=", serverID)
+            .execute();
+    }
+
     private async findExistingStoreSubscription(args: {
         environment: BillingEnvironment;
         externalOriginalID: null | string;
@@ -1874,6 +2621,20 @@ export class Database extends EventEmitter {
         }
 
         return null;
+    }
+
+    private async incrementServerRevision(
+        executor: Kysely<ServerDatabase> | Transaction<ServerDatabase>,
+        serverID: string,
+    ): Promise<string> {
+        const result = await executor
+            .updateTable("servers")
+            .set({ revision: sql<number>`revision + 1` })
+            .where("serverID", "=", serverID)
+            .returning("revision")
+            .executeTakeFirst();
+        if (!result) throw new Error("Server not found.");
+        return String(result.revision);
     }
 
     private async init(): Promise<void> {
@@ -1963,10 +2724,12 @@ export class Database extends EventEmitter {
         deviceID: string,
         userID: string,
         time = new Date().toISOString(),
-    ): MailSQL {
+        deliveryDeviceID = mail.recipient,
+    ): MailSQL & { deliveryDeviceID: string } {
         return {
             authorID: userID,
             cipher: XUtils.encodeHex(mail.cipher),
+            deliveryDeviceID,
             // Opaque transport metadata (X3DH initial payload or ratchet header).
             extra: XUtils.encodeHex(mail.extra),
             forward: mail.forward,
@@ -2139,6 +2902,12 @@ function expiryRank(expiresAt: null | string): number {
     return Number.isFinite(value) ? value : 0;
 }
 
+function mailGroupForChannel(channelID: string): string {
+    return uuidValidate(channelID)
+        ? XUtils.encodeHex(uuidParse(channelID))
+        : channelID;
+}
+
 // Mirrors `Spire.normalizeRegistrationUsername` — kept in sync so a
 // caller invoking `createUser` directly (e.g. tests, future internal
 // flows) gets the same lowercase canonicalization the public
@@ -2254,13 +3023,17 @@ function toPasskey(row: PasskeyRow): Passkey {
 }
 
 function toServer(row: {
+    homeserverId: null | string;
     icon: null | string;
     name: string;
+    revision: number;
     serverID: string;
 }): Server {
     return {
+        ...(row.homeserverId ? { homeserverId: row.homeserverId } : {}),
         icon: row.icon ?? undefined,
         name: row.name,
+        revision: String(row.revision),
         serverID: row.serverID,
     };
 }

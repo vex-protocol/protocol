@@ -34,8 +34,10 @@ export interface Permission {
 
 /** Chat server. */
 export interface Server {
+    homeserverId?: string | undefined;
     icon?: string | undefined;
     name: string;
+    revision?: string | undefined;
     serverID: string;
 }
 
@@ -50,8 +52,18 @@ export interface ServerChannelBootstrap {
 /** Chat server. */
 export const ServerSchema: z.ZodType<Server> = z
     .object({
+        homeserverId: z
+            .string()
+            .optional()
+            .describe("Authoritative homeserver ID"),
         icon: z.string().optional().describe("Server icon file ID"),
         name: z.string().describe("Server display name"),
+        revision: z
+            .string()
+            .max(16)
+            .regex(/^(?:0|[1-9][0-9]*)$/)
+            .optional()
+            .describe("Monotonic room state revision"),
         serverID: z.string().describe("Unique server identifier"),
     })
     .describe("Chat server");

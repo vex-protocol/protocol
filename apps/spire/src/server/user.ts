@@ -5,6 +5,7 @@
  */
 
 import type { Database } from "../Database.ts";
+import type { FederationService } from "../federation/FederationService.ts";
 import type {
     AuthenticatorTransportFuture,
     RegistrationResponseJSON,
@@ -25,11 +26,13 @@ import { stringify } from "uuid";
 import { z } from "zod/v4";
 
 import { MAX_ACTIVE_DEVICES_PER_USER } from "../Database.ts";
+import { FederationServiceError } from "../federation/FederationService.ts";
 import { msgpack } from "../utils/msgpack.ts";
 import { verifyDevicePayloadPreKeySignature } from "../utils/preKeySignature.ts";
 import { spireXSignOpenAsync } from "../utils/spireXSignOpenAsync.ts";
 
 import { AppError } from "./errors.ts";
+import { publicPeerDevice } from "./publicDevice.ts";
 import { censorUser, getParam, getUser } from "./utils.ts";
 import { buildAndroidApkKeyHashOrigins } from "./wellKnown.ts";
 
@@ -494,6 +497,7 @@ export const getUserRouter = (
         deviceID?: string,
     ) => void,
     disconnectDevices?: (deviceIDs: string[]) => void,
+    federation?: FederationService,
 ) => {
     const router = express.Router();
 
@@ -796,24 +800,45 @@ export const getUserRouter = (
     });
 
     router.get("/:id", protect, async (req, res) => {
-        const user = await db.retrieveUser(getParam(req, "id"));
-
-        if (user) {
-            return res.send(msgpack.encode(censorUser(user)));
-        } else {
-            return res.sendStatus(404);
+        try {
+            const id = getParam(req, "id");
+            if (federation) {
+                const user = (await federation.resolveAccount(id))?.user;
+                return user
+                    ? res.send(msgpack.encode(user))
+                    : res.sendStatus(404);
+            }
+            const user = await db.retrieveUser(id);
+            return user
+                ? res.send(msgpack.encode(censorUser(user)))
+                : res.sendStatus(404);
+        } catch (error: unknown) {
+            return sendFederationError(res, error);
         }
     });
 
     router.get("/:id/devices", protect, async (req, res) => {
         const id = getParam(req, "id");
-        const user = await db.retrieveUser(id);
-        if (!user) {
-            res.sendStatus(404);
-            return;
+        try {
+            const authenticatedUser = getUser(req);
+            if (id === authenticatedUser.userID) {
+                const deviceList = await db.retrieveUserDeviceList([id]);
+                return res.send(msgpack.encode(deviceList));
+            }
+            if (federation) {
+                const devices = await federation.resolveDevices(id);
+                if (!devices) return res.sendStatus(404);
+                return res.send(msgpack.encode(devices.map(publicPeerDevice)));
+            }
+            const user = await db.retrieveUser(id);
+            if (!user) {
+                return res.sendStatus(404);
+            }
+            const deviceList = await db.retrieveUserDeviceList([id]);
+            return res.send(msgpack.encode(deviceList.map(publicPeerDevice)));
+        } catch (error: unknown) {
+            return sendFederationError(res, error);
         }
-        const deviceList = await db.retrieveUserDeviceList([id]);
-        return res.send(msgpack.encode(deviceList));
     });
 
     router.get("/:id/permissions", protect, async (req, res) => {
@@ -1174,3 +1199,15 @@ export const getUserRouter = (
 
     return router;
 };
+
+function sendFederationError(
+    response: express.Response,
+    error: unknown,
+): express.Response {
+    const status = error instanceof FederationServiceError ? error.status : 502;
+    const message =
+        error instanceof FederationServiceError
+            ? error.message
+            : "The authoritative homeserver could not be reached.";
+    return response.status(status).json({ error: message });
+}

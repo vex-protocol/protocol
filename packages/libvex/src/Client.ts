@@ -29,6 +29,9 @@ import type {
     Device,
     DevicePayload,
     Emoji,
+    FederationMigrationChallenge,
+    FederationMigrationImportResult,
+    FederationMigrationPrepareResult,
     FileResponse,
     FileSQL,
     GooglePurchaseVerificationRequest,
@@ -58,6 +61,7 @@ import {
     xConstants,
     xDHAsync,
     xEncode,
+    xFederationMigrationAuthorizationDigest,
     xHMAC,
     xKDF,
     XKeyConvert,
@@ -69,6 +73,7 @@ import {
     xSecretboxAsync,
     xSecretboxOpenAsync,
     xSignAsync,
+    xSignDetached,
     xSignKeyPair,
     xSignKeyPairAsync,
     xSignKeyPairFromSecret,
@@ -363,6 +368,9 @@ import {
     DeviceRegistrationResultCodec,
     EmojiArrayCodec,
     EmojiCodec,
+    FederationMigrationChallengeCodec,
+    FederationMigrationImportResultCodec,
+    FederationMigrationPrepareResultCodec,
     FileSQLCodec,
     InviteArrayCodec,
     InviteCodec,
@@ -751,6 +759,19 @@ export interface Message {
     sender: string;
     /** Time the message was created/received. */
     timestamp: string;
+}
+
+/** Portable account-state operations for moving between homeservers. */
+export interface Migration {
+    /** Imports portable state after the registry route is finalized locally. */
+    import: (
+        sourceHomeserverId: string,
+        migrationId: string,
+    ) => Promise<FederationMigrationImportResult>;
+    /** Creates and device-signs a migration grant on the current homeserver. */
+    prepare: (
+        destinationHomeserverId: string,
+    ) => Promise<FederationMigrationPrepareResult>;
 }
 
 /**
@@ -1607,6 +1628,12 @@ export class Client {
          */
         send: (userID: string, message: string, opts?: MessageSendOptions) =>
             this.sendMessage(userID, message, opts),
+    };
+
+    /** Homeserver migration operations. */
+    public migration: Migration = {
+        import: this.importHomeserverMigration.bind(this),
+        prepare: this.prepareHomeserverMigration.bind(this),
     };
     /**
      * Server moderation helper methods.
@@ -2826,7 +2853,7 @@ export class Client {
             let keyBundle: KeyBundle;
 
             try {
-                keyBundle = await this.retrieveKeyBundle(device.deviceID);
+                keyBundle = await this.retrieveKeyBundle(device);
                 await verifyKeyBundleSignatures(keyBundle, device);
             } catch (e) {
                 if (allowKeyBundleFailure) {
@@ -3864,6 +3891,21 @@ export class Client {
         return true;
     }
 
+    private async importHomeserverMigration(
+        sourceHomeserverId: string,
+        migrationId: string,
+    ): Promise<FederationMigrationImportResult> {
+        const response = await this.http.post(
+            this.getHost() + "/migration/import",
+            msgpack.encode({ migrationId, sourceHomeserverId }),
+            { headers: { "Content-Type": "application/msgpack" } },
+        );
+        return decodeHttpResponse(
+            FederationMigrationImportResultCodec,
+            response.data,
+        );
+    }
+
     /**
      * Initializes the keyring. This must be called before anything else.
      */
@@ -4294,6 +4336,51 @@ export class Client {
                 await sleep(1000);
             }
         }
+    }
+
+    private async prepareHomeserverMigration(
+        destinationHomeserverId: string,
+    ): Promise<FederationMigrationPrepareResult> {
+        const challengeResponse = await this.http.post(
+            this.getHost() + "/migration/challenge",
+            msgpack.encode({ destinationHomeserverId }),
+            { headers: { "Content-Type": "application/msgpack" } },
+        );
+        const challenge: FederationMigrationChallenge = decodeHttpResponse(
+            FederationMigrationChallengeCodec,
+            challengeResponse.data,
+        );
+        const expectedDeviceKey = `0x${XUtils.encodeHex(
+            this.signKeys.publicKey,
+        )}`;
+        if (
+            challenge.accountId !== this.getUser().userID ||
+            challenge.destinationHomeserverId !== destinationHomeserverId ||
+            challenge.deviceKey !== expectedDeviceKey ||
+            challenge.expiresAt <= Date.now()
+        ) {
+            throw new Error(
+                "The homeserver returned an invalid migration challenge.",
+            );
+        }
+        const authorization = {
+            ...challenge,
+            signature: XUtils.encodeHex(
+                xSignDetached(
+                    xFederationMigrationAuthorizationDigest(challenge),
+                    this.signKeys.secretKey,
+                ),
+            ),
+        };
+        const prepareResponse = await this.http.post(
+            this.getHost() + "/migration/prepare",
+            msgpack.encode(authorization),
+            { headers: { "Content-Type": "application/msgpack" } },
+        );
+        return decodeHttpResponse(
+            FederationMigrationPrepareResultCodec,
+            prepareResponse.data,
+        );
     }
 
     private async publishPendingDeviceRegistration(args: {
@@ -5345,9 +5432,11 @@ export class Client {
         return decodeHttpResponse(InviteArrayCodec, res.data);
     }
 
-    private async retrieveKeyBundle(deviceID: string): Promise<KeyBundle> {
+    private async retrieveKeyBundle(device: Device): Promise<KeyBundle> {
         const res = await this.http.post(
-            this.getHost() + "/device/" + deviceID + "/keyBundle",
+            this.getHost() + "/device/" + device.deviceID + "/keyBundle",
+            msgpack.encode({ accountId: device.owner }),
+            { headers: { "Content-Type": "application/msgpack" } },
         );
         return decodeHttpResponse(KeyBundleCodec, res.data);
     }

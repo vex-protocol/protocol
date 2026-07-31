@@ -416,6 +416,529 @@ export interface ErrMsg extends BaseMsg {
 export const ErrMsgSchema: z.ZodType<ErrMsg>;
 
 // @public
+export interface FederationAccountQuery {
+    // (undocumented)
+    accountId: string;
+}
+
+// @public (undocumented)
+export const FederationAccountQuerySchema: z.ZodType<FederationAccountQuery>;
+
+// @public
+export interface FederationAccountResult {
+    // (undocumented)
+    devices: FederationDevice[];
+    // (undocumented)
+    position: RegistryPosition;
+    // (undocumented)
+    user: User;
+}
+
+// @public (undocumented)
+export const FederationAccountResultSchema: z.ZodType<FederationAccountResult>;
+
+// @public (undocumented)
+export interface FederationDevice {
+    // (undocumented)
+    deviceID: string;
+    // (undocumented)
+    owner: string;
+    // (undocumented)
+    signKey: string;
+}
+
+// @public (undocumented)
+export const FederationDeviceSchema: z.ZodType<FederationDevice>;
+
+// @public (undocumented)
+export interface FederationInvitePreview {
+    // (undocumented)
+    channels: Channel[];
+    // (undocumented)
+    invite: Invite;
+    // (undocumented)
+    server: Server;
+}
+
+// @public (undocumented)
+export const FederationInvitePreviewSchema: z.ZodType<FederationInvitePreview>;
+
+// @public (undocumented)
+export interface FederationInviteQuery {
+    // (undocumented)
+    inviteId: string;
+}
+
+// @public (undocumented)
+export const FederationInviteQuerySchema: z.ZodType<FederationInviteQuery>;
+
+// @public (undocumented)
+export interface FederationInviteRedeemQuery extends FederationInviteQuery {
+    // (undocumented)
+    accountId: string;
+}
+
+// @public (undocumented)
+export const FederationInviteRedeemQuerySchema: z.ZodType<FederationInviteRedeemQuery>;
+
+// @public (undocumented)
+export interface FederationInviteRedeemResult {
+    // (undocumented)
+    permission: Permission;
+    // (undocumented)
+    snapshot: FederationRoomSnapshot;
+}
+
+// @public (undocumented)
+export const FederationInviteRedeemResultSchema: z.ZodType<FederationInviteRedeemResult>;
+
+// @public (undocumented)
+export interface FederationInviteReference {
+    // (undocumented)
+    homeserverId: null | string;
+    // (undocumented)
+    inviteId: string;
+}
+
+// @public
+export interface FederationKeyBundleQuery {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    deviceId: string;
+    // (undocumented)
+    requesterAccountId: string;
+}
+
+// @public (undocumented)
+export const FederationKeyBundleQuerySchema: z.ZodType<FederationKeyBundleQuery>;
+
+// @public
+export interface FederationKeyBundleResult {
+    // (undocumented)
+    device: FederationDevice;
+    // (undocumented)
+    keyBundle: KeyBundle;
+    // (undocumented)
+    position: RegistryPosition;
+}
+
+// @public (undocumented)
+export const FederationKeyBundleResultSchema: z.ZodType<FederationKeyBundleResult>;
+
+// @public
+export interface FederationMailEnvelope {
+    // (undocumented)
+    header: Uint8Array;
+    // (undocumented)
+    mail: MailWS;
+    // (undocumented)
+    registrySequence: string;
+    // (undocumented)
+    roomAuthorization: FederationRoomMailAuthorization | null;
+    // (undocumented)
+    senderDeviceKey: string;
+}
+
+// @public (undocumented)
+export const FederationMailEnvelopeSchema: z.ZodType<FederationMailEnvelope>;
+
+// @public
+export interface FederationMailResult {
+    // (undocumented)
+    duplicate: boolean;
+}
+
+// @public (undocumented)
+export const FederationMailResultSchema: z.ZodType<FederationMailResult>;
+
+// @public (undocumented)
+export interface FederationMigrationAuthorization extends FederationMigrationAuthorizationInput {
+    // (undocumented)
+    signature: string;
+}
+
+// @public (undocumented)
+export interface FederationMigrationAuthorizationInput {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    destinationHomeserverId: string;
+    // (undocumented)
+    deviceKey: string;
+    // (undocumented)
+    expiresAt: number;
+    // (undocumented)
+    nonce: string;
+    // (undocumented)
+    sourceHomeserverId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationAuthorizationInputSchema: z.ZodType<FederationMigrationAuthorizationInput>;
+
+// @public (undocumented)
+export const FederationMigrationAuthorizationSchema: z.ZodType<FederationMigrationAuthorization>;
+
+// @public (undocumented)
+export interface FederationMigrationAvatarReference {
+    // (undocumented)
+    contentType: string;
+    // (undocumented)
+    sha256: string;
+    // (undocumented)
+    size: number;
+}
+
+// @public (undocumented)
+export const FederationMigrationAvatarReferenceSchema: z.ZodType<FederationMigrationAvatarReference>;
+
+// @public (undocumented)
+export interface FederationMigrationBlobResult {
+    // (undocumented)
+    contentType: string;
+    // (undocumented)
+    data: Uint8Array;
+}
+
+// @public (undocumented)
+export const FederationMigrationBlobResultSchema: z.ZodType<FederationMigrationBlobResult>;
+
+// @public (undocumented)
+export type FederationMigrationChallenge = FederationMigrationAuthorizationInput;
+
+// @public (undocumented)
+export const FederationMigrationChallengeSchema: z.ZodType<FederationMigrationChallenge>;
+
+// @public (undocumented)
+export interface FederationMigrationCompleteResult {
+    // (undocumented)
+    completed: boolean;
+}
+
+// @public (undocumented)
+export const FederationMigrationCompleteResultSchema: z.ZodType<FederationMigrationCompleteResult>;
+
+// @public (undocumented)
+export interface FederationMigrationFileQuery extends FederationMigrationQuery {
+    // (undocumented)
+    fileId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationFileQuerySchema: z.ZodType<FederationMigrationFileQuery>;
+
+// @public (undocumented)
+export interface FederationMigrationFileReference {
+    // (undocumented)
+    fileId: string;
+    // (undocumented)
+    nonce: string;
+    // (undocumented)
+    ownerDeviceKey: string;
+    // (undocumented)
+    sha256: string;
+    // (undocumented)
+    size: number;
+}
+
+// @public (undocumented)
+export const FederationMigrationFileReferenceSchema: z.ZodType<FederationMigrationFileReference>;
+
+// @public (undocumented)
+export interface FederationMigrationImportRequest {
+    // (undocumented)
+    migrationId: string;
+    // (undocumented)
+    sourceHomeserverId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationImportRequestSchema: z.ZodType<FederationMigrationImportRequest>;
+
+// @public (undocumented)
+export interface FederationMigrationImportResult {
+    // (undocumented)
+    avatarImported: boolean;
+    // (undocumented)
+    filesImported: number;
+    // (undocumented)
+    mailDeferred: number;
+    // (undocumented)
+    mailImported: number;
+    // (undocumented)
+    roomsImported: number;
+}
+
+// @public (undocumented)
+export const FederationMigrationImportResultSchema: z.ZodType<FederationMigrationImportResult>;
+
+// @public (undocumented)
+export interface FederationMigrationMailEntry {
+    // (undocumented)
+    header: Uint8Array;
+    // (undocumented)
+    mail: MailWS;
+    // (undocumented)
+    recipientDeviceKey: string;
+    // (undocumented)
+    time: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationMailEntrySchema: z.ZodType<FederationMigrationMailEntry>;
+
+// @public (undocumented)
+export interface FederationMigrationMailPage {
+    // (undocumented)
+    entries: FederationMigrationMailEntry[];
+    // (undocumented)
+    nextCursor: null | number;
+}
+
+// @public (undocumented)
+export const FederationMigrationMailPageSchema: z.ZodType<FederationMigrationMailPage>;
+
+// @public (undocumented)
+export interface FederationMigrationMailQuery extends FederationMigrationQuery {
+    // (undocumented)
+    cursor: number;
+}
+
+// @public (undocumented)
+export const FederationMigrationMailQuerySchema: z.ZodType<FederationMigrationMailQuery>;
+
+// @public (undocumented)
+export interface FederationMigrationManifest {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    authorization: FederationMigrationAuthorization;
+    // (undocumented)
+    avatar: FederationMigrationAvatarReference | null;
+    // (undocumented)
+    files: FederationMigrationFileReference[];
+    // (undocumented)
+    migrationId: string;
+    // (undocumented)
+    rooms: FederationMigrationRoomReference[];
+    // (undocumented)
+    transferExpiresAt: number;
+}
+
+// @public (undocumented)
+export const FederationMigrationManifestSchema: z.ZodType<FederationMigrationManifest>;
+
+// @public (undocumented)
+export interface FederationMigrationPrepareResult {
+    // (undocumented)
+    expiresAt: number;
+    // (undocumented)
+    migrationId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationPrepareResultSchema: z.ZodType<FederationMigrationPrepareResult>;
+
+// @public (undocumented)
+export interface FederationMigrationQuery {
+    // (undocumented)
+    migrationId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationQuerySchema: z.ZodType<FederationMigrationQuery>;
+
+// @public (undocumented)
+export interface FederationMigrationRoomReference {
+    // (undocumented)
+    homeserverId: string;
+    // (undocumented)
+    serverId: string;
+}
+
+// @public (undocumented)
+export const FederationMigrationRoomReferenceSchema: z.ZodType<FederationMigrationRoomReference>;
+
+// @public (undocumented)
+export interface FederationRoomDeletion {
+    // (undocumented)
+    originHomeserverId: string;
+    // (undocumented)
+    revision: string;
+    // (undocumented)
+    serverId: string;
+}
+
+// @public (undocumented)
+export const FederationRoomDeletionSchema: z.ZodType<FederationRoomDeletion>;
+
+// @public (undocumented)
+export interface FederationRoomInvitesQuery {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    serverId: string;
+}
+
+// @public (undocumented)
+export const FederationRoomInvitesQuerySchema: z.ZodType<FederationRoomInvitesQuery>;
+
+// @public (undocumented)
+export const FederationRoomInvitesResultSchema: z.ZodType<Invite[]>;
+
+// @public
+export interface FederationRoomMailAuthorization {
+    // (undocumented)
+    channelId: string;
+    // (undocumented)
+    expiresAt: number;
+    // (undocumented)
+    originHomeserverId: string;
+    // (undocumented)
+    recipientAccountId: string;
+    // (undocumented)
+    revision: string;
+    // (undocumented)
+    senderAccountId: string;
+    // (undocumented)
+    serverId: string;
+    // (undocumented)
+    signature: string;
+}
+
+// @public
+export type FederationRoomMailAuthorizationQuery = Omit<FederationRoomMailAuthorization, "expiresAt" | "originHomeserverId" | "revision" | "signature">;
+
+// @public (undocumented)
+export const FederationRoomMailAuthorizationQuerySchema: z.ZodType<FederationRoomMailAuthorizationQuery>;
+
+// @public (undocumented)
+export const FederationRoomMailAuthorizationSchema: z.ZodType<FederationRoomMailAuthorization>;
+
+// @public
+export interface FederationRoomMember {
+    // (undocumented)
+    permissionId: string;
+    // (undocumented)
+    powerLevel: number;
+    // (undocumented)
+    userId: string;
+}
+
+// @public (undocumented)
+export const FederationRoomMemberSchema: z.ZodType<FederationRoomMember>;
+
+// @public (undocumented)
+export type FederationRoomMutation = {
+    channelId: string;
+    name: string;
+    type: "rename-channel";
+} | {
+    channelId: string;
+    type: "delete-channel";
+} | {
+    durationMs: number;
+    type: "create-invite";
+} | {
+    file: Uint8Array;
+    type: "set-icon";
+} | {
+    name: string;
+    type: "create-channel";
+} | {
+    name: string;
+    type: "rename-server";
+} | {
+    permissionId: string;
+    powerLevel: 0 | 50 | 100;
+    type: "update-member";
+} | {
+    permissionId: string;
+    type: "remove-member";
+} | {
+    type: "delete-server";
+} | {
+    type: "remove-icon";
+};
+
+// @public (undocumented)
+export interface FederationRoomMutationQuery {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    mutation: FederationRoomMutation;
+    // (undocumented)
+    serverId: string;
+}
+
+// @public (undocumented)
+export const FederationRoomMutationQuerySchema: z.ZodType<FederationRoomMutationQuery>;
+
+// @public (undocumented)
+export type FederationRoomMutationResult = {
+    channel: Channel;
+    resultType: "channel";
+    snapshot: FederationRoomSnapshot;
+} | {
+    invite: Invite;
+    resultType: "invite";
+    snapshot: FederationRoomSnapshot;
+} | {
+    permission: Permission;
+    resultType: "permission";
+    snapshot: FederationRoomSnapshot;
+} | {
+    resultType: "deleted";
+    snapshot: FederationRoomSnapshot | null;
+} | {
+    resultType: "left";
+    snapshot: FederationRoomSnapshot;
+} | {
+    resultType: "server";
+    server: Server;
+    snapshot: FederationRoomSnapshot;
+};
+
+// @public (undocumented)
+export const FederationRoomMutationResultSchema: z.ZodType<FederationRoomMutationResult>;
+
+// @public (undocumented)
+export interface FederationRoomPushResult {
+    // (undocumented)
+    accepted: boolean;
+}
+
+// @public (undocumented)
+export const FederationRoomPushResultSchema: z.ZodType<FederationRoomPushResult>;
+
+// @public
+export interface FederationRoomSnapshot {
+    // (undocumented)
+    channels: Channel[];
+    // (undocumented)
+    members: FederationRoomMember[];
+    // (undocumented)
+    revision: string;
+    // (undocumented)
+    server: Server;
+}
+
+// @public (undocumented)
+export interface FederationRoomSnapshotQuery {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    serverId: string;
+}
+
+// @public (undocumented)
+export const FederationRoomSnapshotQuerySchema: z.ZodType<FederationRoomSnapshotQuery>;
+
+// @public (undocumented)
+export const FederationRoomSnapshotSchema: z.ZodType<FederationRoomSnapshot>;
+
+// @public
 export interface FilePayload {
     // (undocumented)
     file?: string | undefined;
@@ -451,6 +974,9 @@ export interface FileSQL {
 
 // @public
 export const FileSQLSchema: z.ZodType<FileSQL>;
+
+// @public
+export function formatFederationInviteReference(homeserverId: string, inviteId: string): string;
 
 // @public (undocumented)
 export interface GooglePlayDeveloperNotificationRequest {
@@ -512,6 +1038,22 @@ export interface IdentityKeys {
 
 // @public
 export const IdentityKeysSchema: z.ZodType<IdentityKeys>;
+
+// @public
+export interface IdentityResolver {
+    // (undocumented)
+    resolveAccount(accountId: string, options?: RegistryResolveOptions): Promise<null | RegistryResolution<RegistryAccount>>;
+    // (undocumented)
+    resolveDevice(accountId: string, deviceKey: string, options?: RegistryResolveOptions): Promise<null | RegistryResolution<RegistryDevice>>;
+    // (undocumented)
+    resolveHomeserver(homeserverId: string, options?: RegistryResolveOptions): Promise<null | RegistryResolution<RegistryHomeserver>>;
+    // (undocumented)
+    resolveIdentity(accountId: string, options?: RegistryResolveOptions): Promise<null | RegistryIdentityResolution>;
+    // (undocumented)
+    resolveUsername(username: string, options?: RegistryResolveOptions): Promise<null | RegistryResolution<RegistryUsername>>;
+    // (undocumented)
+    readonly source: string;
+}
 
 // @public
 export interface Invite {
@@ -645,6 +1187,9 @@ export interface NotifyMsg extends BaseMsg {
 
 // @public
 export const NotifyMsgSchema: z.ZodType<NotifyMsg>;
+
+// @public
+export function parseFederationInviteReference(value: string): FederationInviteReference | null;
 
 // @public
 export interface Passkey {
@@ -876,6 +1421,127 @@ export interface RegistrationPayload extends DevicePayload {
 export const RegistrationPayloadSchema: z.ZodType<RegistrationPayload>;
 
 // @public
+export interface RegistryAccount {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    activeDeviceCount: number;
+    // (undocumented)
+    deviceThreshold: number;
+    // (undocumented)
+    epoch: string;
+    // (undocumented)
+    homeserverId: string;
+    // (undocumented)
+    nonce: string;
+    // (undocumented)
+    recoveryCommitment: string;
+}
+
+// @public
+export const RegistryAccountSchema: z.ZodType<RegistryAccount>;
+
+// @public
+export const RegistryBytes32Schema: z.ZodType<string>;
+
+// @public
+export interface RegistryDevice {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    active: boolean;
+    // (undocumented)
+    addedAtEpoch: string;
+    // (undocumented)
+    deviceKey: string;
+    // (undocumented)
+    keyAlgorithm: "Ed25519";
+    // (undocumented)
+    revokedAtEpoch: null | string;
+}
+
+// @public
+export const RegistryDeviceSchema: z.ZodType<RegistryDevice>;
+
+// @public
+export interface RegistryHomeserver {
+    // (undocumented)
+    active: boolean;
+    // (undocumented)
+    endpoint: string;
+    // (undocumented)
+    epoch: string;
+    // (undocumented)
+    homeserverId: string;
+    // (undocumented)
+    keyAlgorithm: "Ed25519";
+    // (undocumented)
+    nonce: string;
+    // (undocumented)
+    signingKey: string;
+}
+
+// @public
+export const RegistryHomeserverSchema: z.ZodType<RegistryHomeserver>;
+
+// @public
+export interface RegistryIdentityResolution {
+    // (undocumented)
+    account: RegistryAccount;
+    // (undocumented)
+    devices: RegistryDevice[];
+    // (undocumented)
+    homeserver: RegistryHomeserver;
+    // (undocumented)
+    position: RegistryPosition;
+    // (undocumented)
+    username: null | RegistryUsername;
+}
+
+// @public
+export const RegistryIdentityResolutionSchema: z.ZodType<RegistryIdentityResolution>;
+
+// @public
+export interface RegistryPosition {
+    // (undocumented)
+    checkpoint: string;
+    // (undocumented)
+    sequence: string;
+    // (undocumented)
+    source: string;
+}
+
+// @public
+export const RegistryPositionSchema: z.ZodType<RegistryPosition>;
+
+// @public
+export interface RegistryResolution<T> {
+    // (undocumented)
+    position: RegistryPosition;
+    // (undocumented)
+    record: T;
+}
+
+// @public
+export interface RegistryResolveOptions {
+    // (undocumented)
+    minimumSequence?: string | undefined;
+}
+
+// @public
+export interface RegistryUsername {
+    // (undocumented)
+    accountId: string;
+    // (undocumented)
+    nameHash: string;
+    // (undocumented)
+    username: string;
+}
+
+// @public
+export const RegistryUsernameSchema: z.ZodType<RegistryUsername>;
+
+// @public
 export interface ResourceMsg extends BaseMsg {
     // (undocumented)
     action: string;
@@ -904,9 +1570,13 @@ export const RespMsgSchema: z.ZodType<RespMsg>;
 // @public
 export interface Server {
     // (undocumented)
+    homeserverId?: string | undefined;
+    // (undocumented)
     icon?: string | undefined;
     // (undocumented)
     name: string;
+    // (undocumented)
+    revision?: string | undefined;
     // (undocumented)
     serverID: string;
 }

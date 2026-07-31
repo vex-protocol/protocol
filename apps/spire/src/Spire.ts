@@ -4,11 +4,14 @@
  * Commercial licenses available at vex.wtf
  */
 
+import type { SpireIdentityRegistryOptions } from "./registry/config.ts";
+import type { RegistryStore } from "./registry/RegistryStore.ts";
 import type {
     ActionToken,
     BaseMsg,
     Device,
     MailWS,
+    RegistryIdentityResolution,
     User,
 } from "@vex-chat/types";
 import type { IncomingMessage, Server } from "http";
@@ -50,8 +53,18 @@ import {
     validateAccountPassword,
     verifyPassword,
 } from "./Database.ts";
+import { FederationClient } from "./federation/FederationClient.ts";
+import {
+    FederationService,
+    FederationServiceError,
+} from "./federation/FederationService.ts";
+import { HomeserverMigrationService } from "./federation/HomeserverMigrationService.ts";
 import { resolveIceServersFromEnv } from "./IceServers.ts";
 import { NotificationService } from "./NotificationService.ts";
+import {
+    EvmRegistryIndexer,
+    evmRegistrySource,
+} from "./registry/EvmRegistryIndexer.ts";
 import { initApp, protect } from "./server/index.ts";
 import {
     MailIngressValidationError,
@@ -240,6 +253,7 @@ export interface SpireOptions {
      */
     apiPort?: number;
     dbType?: "mysql" | "sqlite3" | "sqlite3mem" | "sqlite";
+    identityRegistry?: SpireIdentityRegistryOptions;
 }
 
 export class Spire extends EventEmitter {
@@ -254,12 +268,19 @@ export class Spire extends EventEmitter {
         string,
         { deviceID: string; nonce: string; time: number }
     >();
+    private federationClient: FederationClient | null = null;
+    private federationService: FederationService | null = null;
+    private homeserverId: null | string = null;
+    private homeserverMigrationService: HomeserverMigrationService | null =
+        null;
+    private identityResolver: null | RegistryStore = null;
     private mailPruneInterval: null | ReturnType<typeof setInterval> = null;
     private notifications: NotificationService;
     private queuedRequestIncrements = 0;
 
-    private requestsTotal = 0;
+    private registryIndexer: EvmRegistryIndexer | null = null;
 
+    private requestsTotal = 0;
     private requestsTotalLoaded = false;
     private server: null | Server = null;
 
@@ -285,6 +306,49 @@ export class Spire extends EventEmitter {
         this.api.disable("etag");
 
         this.db = new Database(options);
+        if (options?.identityRegistry) {
+            const source = evmRegistrySource(
+                options.identityRegistry.chainId,
+                options.identityRegistry.registryAddress,
+                options.identityRegistry.registrarAddress,
+            );
+            this.homeserverId = options.identityRegistry.homeserverId;
+            this.identityResolver = this.db.createRegistryStore(source);
+            this.registryIndexer = new EvmRegistryIndexer(
+                this.identityResolver,
+                options.identityRegistry,
+                (error) => {
+                    console.error("Identity registry sync failed:", error);
+                },
+            );
+            this.identityResolver.setAvailabilityCheck(
+                () => this.registryIndexer?.isReady() ?? false,
+            );
+            this.federationClient = new FederationClient(
+                this.identityResolver,
+                this.homeserverId,
+                this.signKeys.secretKey,
+                {
+                    allowPrivateAddresses:
+                        options.identityRegistry
+                            .allowPrivateFederationAddresses,
+                },
+            );
+            this.federationService = new FederationService({
+                client: this.federationClient,
+                db: this.db,
+                homeserverId: this.homeserverId,
+                notify: this.notify.bind(this),
+                resolver: this.identityResolver,
+                signKeys: this.signKeys,
+            });
+            this.homeserverMigrationService = new HomeserverMigrationService({
+                client: this.federationClient,
+                db: this.db,
+                homeserverId: this.homeserverId,
+                resolver: this.identityResolver,
+            });
+        }
         this.calls = new CallManager(this.db, this.notify.bind(this));
         this.notifications = new NotificationService(
             this.db,
@@ -293,6 +357,8 @@ export class Spire extends EventEmitter {
         );
         this.db.on("ready", () => {
             this.dbReady = true;
+            this.registryIndexer?.start();
+            this.federationService?.start();
             void this.db.pruneExpiredMail().catch(() => {
                 /* best-effort — startup prune must not block bring-up */
             });
@@ -326,6 +392,9 @@ export class Spire extends EventEmitter {
 
         this.server?.close();
         this.wss.close();
+        await this.registryIndexer?.stop();
+        await this.federationService?.stop();
+        await this.federationClient?.close();
         await this.db.close();
     }
 
@@ -415,6 +484,36 @@ export class Spire extends EventEmitter {
             this.signKeys,
             this.notify.bind(this),
             this.disconnectDevices.bind(this),
+            this.federationService &&
+                this.homeserverMigrationService &&
+                this.identityResolver &&
+                this.homeserverId
+                ? {
+                      db: this.db,
+                      homeserverId: this.homeserverId,
+                      migration: this.homeserverMigrationService,
+                      notify: this.notify.bind(this),
+                      resolver: this.identityResolver,
+                      roomChanged:
+                          this.federationService.publishRoomSnapshot.bind(
+                              this.federationService,
+                          ),
+                      roomDeleted:
+                          this.federationService.publishRoomDeletion.bind(
+                              this.federationService,
+                          ),
+                      roomDeletionReceived:
+                          this.federationService.receiveRoomDeletion.bind(
+                              this.federationService,
+                          ),
+                      roomSnapshotReceived:
+                          this.federationService.receiveRoomSnapshot.bind(
+                              this.federationService,
+                          ),
+                      service: this.federationService,
+                      signKeys: this.signKeys,
+                  }
+                : undefined,
         );
 
         // WS auth: client sends { type: "auth", token } as first message
@@ -459,6 +558,7 @@ export class Spire extends EventEmitter {
                         this.calls,
                         this.notify.bind(this),
                         userDetails,
+                        this.federationService ?? undefined,
                     );
 
                     client.on("fail", () => {
@@ -581,20 +681,28 @@ export class Spire extends EventEmitter {
             );
         });
 
-        this.api.get("/healthz", (_req, res) => {
-            if (!this.dbReady) {
-                res.status(503).json({ dbReady: false, ok: false });
+        this.api.get("/healthz", async (_req, res) => {
+            const registryReady = await this.registryReady();
+            if (!this.dbReady || !registryReady) {
+                res.status(503).json({
+                    dbReady: this.dbReady,
+                    ok: false,
+                    registryReady,
+                });
                 return;
             }
-            res.json({ dbReady: true, ok: true });
+            res.json({ dbReady: true, ok: true, registryReady: true });
         });
 
         this.api.get("/status", async (req, res) => {
             const started = Date.now();
-            const dbHealthy = this.dbReady ? await this.db.isHealthy() : false;
+            const [dbHealthy, registryReady] = await Promise.all([
+                this.dbReady ? this.db.isHealthy() : Promise.resolve(false),
+                this.registryReady(),
+            ]);
             const checkDurationMs = Date.now() - started;
 
-            const ok = dbHealthy;
+            const ok = dbHealthy && registryReady;
             if (!devApiKeySkipsRateLimits(req)) {
                 res.json({ ok });
                 return;
@@ -608,6 +716,7 @@ export class Spire extends EventEmitter {
                 checkDurationMs,
                 now: new Date(),
                 ok,
+                registryReady,
                 version: this.version,
             });
         });
@@ -696,6 +805,17 @@ export class Spire extends EventEmitter {
                 if (!device || device.signKey !== signKey) {
                     return res.status(404).send({ error: "Device not found." });
                 }
+                if (
+                    this.federationService &&
+                    !(await this.federationService.authorizeLocalSession(
+                        device.owner,
+                        device,
+                    ))
+                ) {
+                    return res.status(403).send({
+                        error: "Device is not active for this account on this homeserver.",
+                    });
+                }
 
                 // Generate challenge nonce (32 bytes)
                 const nonce = XUtils.encodeHex(xRandomBytes(32));
@@ -779,6 +899,17 @@ export class Spire extends EventEmitter {
                         .status(404)
                         .send({ error: "Device owner not found." });
                 }
+                if (
+                    this.federationService &&
+                    !(await this.federationService.authorizeLocalSession(
+                        user.userID,
+                        device,
+                    ))
+                ) {
+                    return res.status(403).send({
+                        error: "Device is not active for this account on this homeserver.",
+                    });
+                }
 
                 // Device proof restores the same bounded account session as password login.
                 const token = signAuthJwt(
@@ -811,6 +942,30 @@ export class Spire extends EventEmitter {
                 return;
             }
             const { header, mail } = parsed.data;
+
+            const federation = this.federationService;
+            if (federation) {
+                try {
+                    await federation.deliverMail(
+                        header,
+                        mail,
+                        senderDeviceDetails,
+                        authorUserDetails.userID,
+                    );
+                    res.sendStatus(200);
+                } catch (error: unknown) {
+                    const status =
+                        error instanceof FederationServiceError
+                            ? error.status
+                            : 502;
+                    const message =
+                        error instanceof Error
+                            ? error.message
+                            : "Federated mail delivery failed.";
+                    res.status(status).json({ error: message });
+                }
+                return;
+            }
 
             let recipientDeviceDetails;
             try {
@@ -862,6 +1017,57 @@ export class Spire extends EventEmitter {
                     error: "Invalid mail batch payload",
                     issues: parsed.error.issues,
                 });
+                return;
+            }
+
+            const federation = this.federationService;
+            if (federation) {
+                const results: MailBatchResult[] = [];
+                const concurrency = 8;
+                for (
+                    let offset = 0;
+                    offset < parsed.data.mails.length;
+                    offset += concurrency
+                ) {
+                    await Promise.all(
+                        parsed.data.mails
+                            .slice(offset, offset + concurrency)
+                            .map(async ({ header, mail }, batchIndex) => {
+                                const index = offset + batchIndex;
+                                try {
+                                    await federation.deliverMail(
+                                        header,
+                                        mail,
+                                        senderDeviceDetails,
+                                        authorUserDetails.userID,
+                                    );
+                                    results[index] = {
+                                        index,
+                                        mailID: mail.mailID,
+                                        ok: true,
+                                        recipient: mail.recipient,
+                                    };
+                                } catch (error: unknown) {
+                                    results[index] = {
+                                        error:
+                                            error instanceof Error
+                                                ? error.message
+                                                : String(error),
+                                        index,
+                                        mailID: mail.mailID,
+                                        ok: false,
+                                        recipient: mail.recipient,
+                                        status:
+                                            error instanceof
+                                            FederationServiceError
+                                                ? error.status
+                                                : 502,
+                                    };
+                                }
+                            }),
+                    );
+                }
+                res.send(msgpack.encode({ results }));
                 return;
             }
 
@@ -1080,6 +1286,17 @@ export class Spire extends EventEmitter {
                         const newHash = await hashPasswordArgon2(password);
                         await this.db.rehashPassword(userEntry.userID, newHash);
                     }
+                    if (
+                        this.federationService &&
+                        !(await this.federationService.authorizeLocalSession(
+                            userEntry.userID,
+                        ))
+                    ) {
+                        res.status(409).json({
+                            error: "This account is registered to a different homeserver.",
+                        });
+                        return;
+                    }
 
                     const token = signAuthJwt(
                         { scope: "user", user: censorUser(userEntry) },
@@ -1158,9 +1375,25 @@ export class Spire extends EventEmitter {
                             });
                             return;
                         }
+                        const registryIdentity =
+                            await this.registryIdentityForRegistration(
+                                normalizedPayload.username,
+                                normalizedPayload.signKey,
+                            );
                         const existingUser = await this.db.retrieveUser(
                             normalizedPayload.username,
                         );
+                        if (
+                            registryIdentity &&
+                            existingUser &&
+                            existingUser.userID !==
+                                registryIdentity.account.accountId
+                        ) {
+                            res.status(409).send({
+                                error: "The local account does not match the finalized registry identity.",
+                            });
+                            return;
+                        }
                         if (
                             normalizedPayload.intent === "create-account" &&
                             existingUser
@@ -1293,6 +1526,7 @@ export class Spire extends EventEmitter {
                         const [user, err] = await this.db.createUser(
                             regKey,
                             normalizedPayload,
+                            registryIdentity?.account.accountId,
                         );
                         if (err !== null) {
                             const errCode =
@@ -1358,6 +1592,10 @@ export class Spire extends EventEmitter {
                         });
                     }
                 } catch (err: unknown) {
+                    if (err instanceof FederationServiceError) {
+                        res.status(err.status).json({ error: err.message });
+                        return;
+                    }
                     const requestId = crypto.randomUUID();
                     const message =
                         err instanceof Error ? err.message : String(err);
@@ -1413,6 +1651,66 @@ export class Spire extends EventEmitter {
             ) {
                 this.actionTokens.delete(key);
             }
+        }
+    }
+
+    private async registryIdentityForRegistration(
+        username: string,
+        signKey: string,
+    ): Promise<null | RegistryIdentityResolution> {
+        if (!this.identityResolver || !this.homeserverId) return null;
+        const usernameResolution =
+            await this.identityResolver.resolveUsername(username);
+        if (!usernameResolution) {
+            throw new FederationServiceError(
+                409,
+                "Complete the on-chain account and username registration before creating this account.",
+            );
+        }
+        const identity = await this.identityResolver.resolveIdentity(
+            usernameResolution.record.accountId,
+        );
+        if (!identity || identity.username?.username !== username) {
+            throw new FederationServiceError(
+                409,
+                "The finalized registry account is incomplete.",
+            );
+        }
+        if (identity.homeserver.homeserverId !== this.homeserverId) {
+            throw new FederationServiceError(
+                409,
+                "This account is registered to a different homeserver.",
+            );
+        }
+        const deviceKey = `0x${signKey.toLowerCase()}`;
+        if (
+            !/^0x[0-9a-f]{64}$/.test(deviceKey) ||
+            !identity.devices.some(
+                (device) => device.active && device.deviceKey === deviceKey,
+            )
+        ) {
+            throw new FederationServiceError(
+                403,
+                "Register this device with the account before connecting it to the homeserver.",
+            );
+        }
+        return identity;
+    }
+
+    private async registryReady(): Promise<boolean> {
+        if (!this.identityResolver || !this.homeserverId) return true;
+        if (!this.dbReady) return false;
+        try {
+            const homeserver = await this.identityResolver.resolveHomeserver(
+                this.homeserverId,
+            );
+            return (
+                homeserver?.record.active === true &&
+                homeserver.record.signingKey ===
+                    `0x${XUtils.encodeHex(this.signKeys.publicKey)}`
+            );
+        } catch {
+            return false;
         }
     }
 

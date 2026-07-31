@@ -6,6 +6,11 @@
 
 import { config } from "dotenv";
 
+import {
+    evmRegistryOptionsFromEnv,
+    REGISTRY_ENV_VARS,
+} from "../registry/config.ts";
+
 const REQUIRED_ENV_VARS = ["DB_TYPE", "JWT_SECRET", "SPK"] as const;
 const NORMALIZED_ENV_VARS = [
     ...REQUIRED_ENV_VARS,
@@ -17,6 +22,7 @@ const NORMALIZED_ENV_VARS = [
     "SPIRE_PASSKEY_IOS_APP_IDS",
     "SPIRE_PASSKEY_ANDROID_PACKAGE",
     "SPIRE_PASSKEY_ANDROID_FINGERPRINTS",
+    ...REGISTRY_ENV_VARS,
 ] as const;
 const HEX_BYTES_RE = /^(?:[0-9a-fA-F]{2})+$/;
 const TWEETNACL_SPK_HEX_LENGTH = 128;
@@ -77,6 +83,7 @@ export function validateSpireRuntimeEnv(
     if (jwtSecret === spk) {
         throw new Error("JWT_SECRET must be separate from SPK.");
     }
+    evmRegistryOptionsFromEnv(env);
 }
 
 function normalizeConfiguredEnv(): void {

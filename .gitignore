@@ -27,3 +27,8 @@ yarn.lock
 .beads/
 .dolt/
 *.db
+
+# Foundry outputs
+contracts/evm/cache/
+contracts/evm/out/
+contracts/evm/broadcast/

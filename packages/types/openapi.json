@@ -48,6 +48,10 @@
             "description": "Server invitations"
         },
         {
+            "name": "migration",
+            "description": "Device-authorized homeserver migration"
+        },
+        {
             "name": "health",
             "description": "Health and readiness checks"
         }
@@ -125,6 +129,10 @@
             "Server": {
                 "type": "object",
                 "properties": {
+                    "homeserverId": {
+                        "type": "string",
+                        "description": "Authoritative homeserver ID"
+                    },
                     "icon": {
                         "type": "string",
                         "description": "Server icon file ID"
@@ -132,6 +140,12 @@
                     "name": {
                         "type": "string",
                         "description": "Server display name"
+                    },
+                    "revision": {
+                        "type": "string",
+                        "maxLength": 16,
+                        "pattern": "^(?:0|[1-9][0-9]*)$",
+                        "description": "Monotonic room state revision"
                     },
                     "serverID": {
                         "type": "string",
@@ -459,6 +473,169 @@
                 ],
                 "additionalProperties": false,
                 "description": "Password replacement payload"
+            },
+            "MigrationAuthorization": {
+                "type": "object",
+                "properties": {
+                    "accountId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "destinationHomeserverId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "deviceKey": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "expiresAt": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                    },
+                    "nonce": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "sourceHomeserverId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "signature": {
+                        "type": "string",
+                        "pattern": "^[0-9a-f]{128}$"
+                    }
+                },
+                "required": [
+                    "accountId",
+                    "destinationHomeserverId",
+                    "deviceKey",
+                    "expiresAt",
+                    "nonce",
+                    "sourceHomeserverId",
+                    "signature"
+                ],
+                "additionalProperties": false
+            },
+            "MigrationChallenge": {
+                "type": "object",
+                "properties": {
+                    "accountId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "destinationHomeserverId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "deviceKey": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "expiresAt": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                    },
+                    "nonce": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    },
+                    "sourceHomeserverId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    }
+                },
+                "required": [
+                    "accountId",
+                    "destinationHomeserverId",
+                    "deviceKey",
+                    "expiresAt",
+                    "nonce",
+                    "sourceHomeserverId"
+                ],
+                "additionalProperties": false
+            },
+            "MigrationImportRequest": {
+                "type": "object",
+                "properties": {
+                    "migrationId": {
+                        "type": "string",
+                        "format": "uuid"
+                    },
+                    "sourceHomeserverId": {
+                        "type": "string",
+                        "pattern": "^0x[0-9a-f]{64}$",
+                        "description": "Canonical lowercase 32-byte hex value"
+                    }
+                },
+                "required": [
+                    "migrationId",
+                    "sourceHomeserverId"
+                ],
+                "additionalProperties": false
+            },
+            "MigrationImportResult": {
+                "type": "object",
+                "properties": {
+                    "avatarImported": {
+                        "type": "boolean"
+                    },
+                    "filesImported": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "mailDeferred": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "mailImported": {
+                        "type": "integer",
+                        "minimum": 0
+                    },
+                    "roomsImported": {
+                        "type": "integer",
+                        "minimum": 0
+                    }
+                },
+                "required": [
+                    "avatarImported",
+                    "filesImported",
+                    "mailDeferred",
+                    "mailImported",
+                    "roomsImported"
+                ],
+                "additionalProperties": false
+            },
+            "MigrationPrepareResult": {
+                "type": "object",
+                "properties": {
+                    "expiresAt": {
+                        "type": "integer",
+                        "exclusiveMinimum": 0,
+                        "maximum": 9007199254740991
+                    },
+                    "migrationId": {
+                        "type": "string",
+                        "format": "uuid"
+                    }
+                },
+                "required": [
+                    "expiresAt",
+                    "migrationId"
+                ],
+                "additionalProperties": false
             }
         },
         "parameters": {}
@@ -1252,6 +1429,10 @@
                                     "items": {
                                         "type": "object",
                                         "properties": {
+                                            "homeserverId": {
+                                                "type": "string",
+                                                "description": "Authoritative homeserver ID"
+                                            },
                                             "icon": {
                                                 "type": "string",
                                                 "description": "Server icon file ID"
@@ -1259,6 +1440,12 @@
                                             "name": {
                                                 "type": "string",
                                                 "description": "Server display name"
+                                            },
+                                            "revision": {
+                                                "type": "string",
+                                                "maxLength": 16,
+                                                "pattern": "^(?:0|[1-9][0-9]*)$",
+                                                "description": "Monotonic room state revision"
                                             },
                                             "serverID": {
                                                 "type": "string",
@@ -1348,6 +1535,293 @@
                 }
             }
         },
+        "/migration/challenge": {
+            "post": {
+                "operationId": "requestHomeserverMigrationChallenge",
+                "summary": "Request a homeserver migration challenge",
+                "description": "Create a short-lived challenge that the authenticated device must sign before this homeserver prepares portable account data.",
+                "tags": [
+                    "migration"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/msgpack": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "destinationHomeserverId": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    }
+                                },
+                                "required": [
+                                    "destinationHomeserverId"
+                                ]
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Device-signing challenge issued",
+                        "content": {
+                            "application/msgpack": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "accountId": {
+                                            "type": "string",
+                                            "pattern": "^0x[0-9a-f]{64}$",
+                                            "description": "Canonical lowercase 32-byte hex value"
+                                        },
+                                        "destinationHomeserverId": {
+                                            "type": "string",
+                                            "pattern": "^0x[0-9a-f]{64}$",
+                                            "description": "Canonical lowercase 32-byte hex value"
+                                        },
+                                        "deviceKey": {
+                                            "type": "string",
+                                            "pattern": "^0x[0-9a-f]{64}$",
+                                            "description": "Canonical lowercase 32-byte hex value"
+                                        },
+                                        "expiresAt": {
+                                            "type": "integer",
+                                            "exclusiveMinimum": 0,
+                                            "maximum": 9007199254740991
+                                        },
+                                        "nonce": {
+                                            "type": "string",
+                                            "pattern": "^0x[0-9a-f]{64}$",
+                                            "description": "Canonical lowercase 32-byte hex value"
+                                        },
+                                        "sourceHomeserverId": {
+                                            "type": "string",
+                                            "pattern": "^0x[0-9a-f]{64}$",
+                                            "description": "Canonical lowercase 32-byte hex value"
+                                        }
+                                    },
+                                    "required": [
+                                        "accountId",
+                                        "destinationHomeserverId",
+                                        "deviceKey",
+                                        "expiresAt",
+                                        "nonce",
+                                        "sourceHomeserverId"
+                                    ],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Account or device is not active locally"
+                    },
+                    "404": {
+                        "description": "Destination homeserver is not registered"
+                    }
+                }
+            }
+        },
+        "/migration/prepare": {
+            "post": {
+                "operationId": "prepareHomeserverMigration",
+                "summary": "Authorize a homeserver migration",
+                "description": "Verify the device-signed challenge and retain a time-limited source transfer. Portable state is frozen only after the finalized registry route moves to the destination.",
+                "tags": [
+                    "migration"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/msgpack": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "accountId": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    },
+                                    "destinationHomeserverId": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    },
+                                    "deviceKey": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    },
+                                    "expiresAt": {
+                                        "type": "integer",
+                                        "exclusiveMinimum": 0,
+                                        "maximum": 9007199254740991
+                                    },
+                                    "nonce": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    },
+                                    "sourceHomeserverId": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    },
+                                    "signature": {
+                                        "type": "string",
+                                        "pattern": "^[0-9a-f]{128}$"
+                                    }
+                                },
+                                "required": [
+                                    "accountId",
+                                    "destinationHomeserverId",
+                                    "deviceKey",
+                                    "expiresAt",
+                                    "nonce",
+                                    "sourceHomeserverId",
+                                    "signature"
+                                ],
+                                "additionalProperties": false
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Migration transfer prepared",
+                        "content": {
+                            "application/msgpack": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "expiresAt": {
+                                            "type": "integer",
+                                            "exclusiveMinimum": 0,
+                                            "maximum": 9007199254740991
+                                        },
+                                        "migrationId": {
+                                            "type": "string",
+                                            "format": "uuid"
+                                        }
+                                    },
+                                    "required": [
+                                        "expiresAt",
+                                        "migrationId"
+                                    ],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Authorization or device signature is invalid"
+                    },
+                    "409": {
+                        "description": "Authorization nonce conflicts with prior use"
+                    }
+                }
+            }
+        },
+        "/migration/import": {
+            "post": {
+                "operationId": "importHomeserverMigration",
+                "summary": "Import portable account state",
+                "description": "Import authoritative room references, encrypted attachments, queued ciphertext, and the public avatar from the previous homeserver after the registry route is finalized.",
+                "tags": [
+                    "migration"
+                ],
+                "security": [
+                    {
+                        "bearerAuth": []
+                    }
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/msgpack": {
+                            "schema": {
+                                "type": "object",
+                                "properties": {
+                                    "migrationId": {
+                                        "type": "string",
+                                        "format": "uuid"
+                                    },
+                                    "sourceHomeserverId": {
+                                        "type": "string",
+                                        "pattern": "^0x[0-9a-f]{64}$",
+                                        "description": "Canonical lowercase 32-byte hex value"
+                                    }
+                                },
+                                "required": [
+                                    "migrationId",
+                                    "sourceHomeserverId"
+                                ],
+                                "additionalProperties": false
+                            }
+                        }
+                    }
+                },
+                "responses": {
+                    "200": {
+                        "description": "Portable state import result",
+                        "content": {
+                            "application/msgpack": {
+                                "schema": {
+                                    "type": "object",
+                                    "properties": {
+                                        "avatarImported": {
+                                            "type": "boolean"
+                                        },
+                                        "filesImported": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        },
+                                        "mailDeferred": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        },
+                                        "mailImported": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        },
+                                        "roomsImported": {
+                                            "type": "integer",
+                                            "minimum": 0
+                                        }
+                                    },
+                                    "required": [
+                                        "avatarImported",
+                                        "filesImported",
+                                        "mailDeferred",
+                                        "mailImported",
+                                        "roomsImported"
+                                    ],
+                                    "additionalProperties": false
+                                }
+                            }
+                        }
+                    },
+                    "403": {
+                        "description": "Account or device is not active locally"
+                    },
+                    "409": {
+                        "description": "Finalized route or migration state is invalid"
+                    },
+                    "502": {
+                        "description": "Source homeserver returned invalid data"
+                    }
+                }
+            }
+        },
         "/server/{id}": {
             "get": {
                 "operationId": "getServer",
@@ -1379,6 +1853,10 @@
                                 "schema": {
                                     "type": "object",
                                     "properties": {
+                                        "homeserverId": {
+                                            "type": "string",
+                                            "description": "Authoritative homeserver ID"
+                                        },
                                         "icon": {
                                             "type": "string",
                                             "description": "Server icon file ID"
@@ -1386,6 +1864,12 @@
                                         "name": {
                                             "type": "string",
                                             "description": "Server display name"
+                                        },
+                                        "revision": {
+                                            "type": "string",
+                                            "maxLength": 16,
+                                            "pattern": "^(?:0|[1-9][0-9]*)$",
+                                            "description": "Monotonic room state revision"
                                         },
                                         "serverID": {
                                             "type": "string",
@@ -1433,6 +1917,10 @@
                                 "schema": {
                                     "type": "object",
                                     "properties": {
+                                        "homeserverId": {
+                                            "type": "string",
+                                            "description": "Authoritative homeserver ID"
+                                        },
                                         "icon": {
                                             "type": "string",
                                             "description": "Server icon file ID"
@@ -1440,6 +1928,12 @@
                                         "name": {
                                             "type": "string",
                                             "description": "Server display name"
+                                        },
+                                        "revision": {
+                                            "type": "string",
+                                            "maxLength": 16,
+                                            "pattern": "^(?:0|[1-9][0-9]*)$",
+                                            "description": "Monotonic room state revision"
                                         },
                                         "serverID": {
                                             "type": "string",
@@ -1860,11 +2354,15 @@
                                         },
                                         "ok": {
                                             "type": "boolean"
+                                        },
+                                        "registryReady": {
+                                            "type": "boolean"
                                         }
                                     },
                                     "required": [
                                         "dbReady",
-                                        "ok"
+                                        "ok",
+                                        "registryReady"
                                     ]
                                 }
                             }

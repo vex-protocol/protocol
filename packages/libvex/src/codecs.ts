@@ -21,6 +21,9 @@ import {
     ChannelSchema,
     DeviceSchema,
     EmojiSchema,
+    FederationMigrationChallengeSchema,
+    FederationMigrationImportResultSchema,
+    FederationMigrationPrepareResultSchema,
     FileSQLSchema,
     InviteSchema,
     KeyBundleSchema,
@@ -45,6 +48,15 @@ export const PermissionCodec = createCodec(PermissionSchema);
 export const InviteCodec = createCodec(InviteSchema);
 export const EmojiCodec = createCodec(EmojiSchema);
 export const FileSQLCodec = createCodec(FileSQLSchema);
+export const FederationMigrationChallengeCodec = createCodec(
+    FederationMigrationChallengeSchema,
+);
+export const FederationMigrationImportResultCodec = createCodec(
+    FederationMigrationImportResultSchema,
+);
+export const FederationMigrationPrepareResultCodec = createCodec(
+    FederationMigrationPrepareResultSchema,
+);
 export const ActionTokenCodec = createCodec(ActionTokenSchema);
 export const AccountEntitlementsCodec = createCodec(AccountEntitlementsSchema);
 export const BillingAccountStateCodec = createCodec(BillingAccountStateSchema);

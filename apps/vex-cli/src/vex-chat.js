@@ -3580,6 +3580,10 @@ function looksLikeDuration(value) {
 
 function parseInviteID(value) {
     const trimmed = value.trim();
+    const portable = trimmed.match(
+        /(?:vex:\/\/invite\/)?(v1\.[0-9a-f]{64}\.[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i,
+    );
+    if (portable?.[1]) return portable[1].toLowerCase();
     if (looksLikeUUID(trimmed)) return trimmed;
     const match = trimmed.match(
         /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i,
@@ -3599,9 +3603,9 @@ function isInviteInput(value) {
 
 function extractInviteID(value) {
     const match = value.match(
-        /vex:\/\/invite\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})/i,
+        /vex:\/\/invite\/((?:v1\.[0-9a-f]{64}\.)?[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})/i,
     );
-    return match?.[1] ?? null;
+    return match?.[1]?.toLowerCase() ?? null;
 }
 
 function replaceInviteLinkWithPreview(message, inviteID, preview) {

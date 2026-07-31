@@ -20,6 +20,8 @@ import { Channel } from '@vex-chat/types';
 import { Device } from '@vex-chat/types';
 import type { Emoji } from '@vex-chat/types';
 import type { EventEmitter } from 'eventemitter3';
+import type { FederationMigrationImportResult } from '@vex-chat/types';
+import type { FederationMigrationPrepareResult } from '@vex-chat/types';
 import type { FileResponse } from '@vex-chat/types';
 import type { FileSQL } from '@vex-chat/types';
 import { GooglePurchaseVerificationRequest } from '@vex-chat/types';
@@ -130,6 +132,7 @@ export class Client {
     logout(): Promise<void>;
     me: Me;
     messages: Messages;
+    migration: Migration;
     moderation: Moderation;
     off<E extends keyof ClientEvents>(event: E, fn?: ClientEvents[E], context?: unknown): this;
     on<E extends keyof ClientEvents>(event: E, fn: ClientEvents[E], context?: unknown): this;
@@ -685,6 +688,12 @@ export interface MessageUpdatePatch {
     extra?: null | string | undefined;
     // (undocumented)
     message?: string | undefined;
+}
+
+// @public
+export interface Migration {
+    import: (sourceHomeserverId: string, migrationId: string) => Promise<FederationMigrationImportResult>;
+    prepare: (destinationHomeserverId: string) => Promise<FederationMigrationPrepareResult>;
 }
 
 // @public (undocumented)

@@ -4,12 +4,6 @@
  * Commercial licenses available at vex.wtf
  */
 
-/**
- * Copyright (c) 2020-2026 Vex Heavy Industries LLC
- * Licensed under AGPL-3.0. See LICENSE for details.
- * Commercial licenses available at vex.wtf
- */
-
 import type { BaseMsg } from "@vex-chat/types";
 
 import { hkdf } from "@noble/hashes/hkdf.js";
@@ -26,6 +20,29 @@ import ed2curve from "ed2curve";
 import { Packr } from "msgpackr";
 import nacl from "tweetnacl";
 import { z } from "zod/v4";
+
+export { xFederationMigrationAuthorizationDigest } from "./federation.js";
+export {
+    xNameCommitment,
+    xNameHash,
+    xNameRegistrationDigest,
+    xRegistryAccountId,
+    xRegistryAddDeviceDigest,
+    xRegistryHomeserverId,
+    xRegistryRegisterAccountDigest,
+    xRegistryRegisterHomeserverDigest,
+    xRegistryRevokeDeviceDigest,
+    xRegistryRotateHomeserverKeyDigest,
+    xRegistrySetDeviceThresholdDigest,
+    xRegistrySetHomeserverDigest,
+    xRegistrySetHomeserverEndpointDigest,
+    xRegistrySetRecoveryCommitmentDigest,
+} from "./registry.js";
+export type {
+    EvmNameRegistrarContext,
+    EvmRegistryAccountAction,
+    EvmRegistryContext,
+} from "./registry.js";
 
 const KEY_DATA_HEADER_BYTES = 54;
 const KEY_DATA_MAC_BYTES = 16;
@@ -831,6 +848,22 @@ export function xSignAsync(
     return Promise.resolve(xSign(message, secretKey));
 }
 
+/** Sign a message and return only its 64-byte Ed25519 signature. */
+export function xSignDetached(
+    message: Uint8Array,
+    secretKey: Uint8Array,
+): Uint8Array {
+    return xSign(message, secretKey).slice(0, 64);
+}
+
+/** Async detached Ed25519 signing. */
+export function xSignDetachedAsync(
+    message: Uint8Array,
+    secretKey: Uint8Array,
+): Promise<Uint8Array> {
+    return Promise.resolve(xSignDetached(message, secretKey));
+}
+
 /** Generate a fresh Ed25519 signing key pair. */
 export function xSignKeyPair(): KeyPair {
     return provider().signKeyPair();
@@ -867,6 +900,29 @@ export function xSignOpenAsync(
     publicKey: Uint8Array,
 ): Promise<null | Uint8Array> {
     return Promise.resolve(xSignOpen(signedMessage, publicKey));
+}
+
+/** Verify a detached 64-byte Ed25519 signature. */
+export function xSignVerifyDetached(
+    message: Uint8Array,
+    signature: Uint8Array,
+    publicKey: Uint8Array,
+): boolean {
+    if (signature.length !== 64) return false;
+    const signedMessage = new Uint8Array(signature.length + message.length);
+    signedMessage.set(signature);
+    signedMessage.set(message, signature.length);
+    const opened = xSignOpen(signedMessage, publicKey);
+    return opened !== null && XUtils.bytesEqual(opened, message);
+}
+
+/** Async detached Ed25519 verification. */
+export function xSignVerifyDetachedAsync(
+    message: Uint8Array,
+    signature: Uint8Array,
+    publicKey: Uint8Array,
+): Promise<boolean> {
+    return Promise.resolve(xSignVerifyDetached(message, signature, publicKey));
 }
 
 /**

@@ -57,8 +57,9 @@ function disableRateLimitsByEnv(): boolean {
 /**
  * Rate limiting middleware.
  *
- * Three tiers matching CWE-307 (brute-force auth), CWE-400 / CWE-770
- * (unrestricted resource consumption), and OWASP API4:2023:
+ * The limiters below address CWE-307 (brute-force auth), CWE-400 / CWE-770
+ * (unrestricted resource consumption), and OWASP API4:2023. The primary tiers
+ * are:
  *
  * - `globalLimiter` — baseline per-IP limit across every route. Wide
  *   enough to not bother normal clients, tight enough to shield the
@@ -68,8 +69,10 @@ function disableRateLimitsByEnv(): boolean {
  *   failed attempts count, so a correct login doesn't eat the budget.
  * - `uploadLimiter` — upload-specific limit applied before multer,
  *   so multer never even parses a request that's over quota.
+ * - `migrationLimiter` — per-account protection for migration challenge,
+ *   preparation, and import work.
  *
- * All three use `ipKeyGenerator` from `express-rate-limit@7.4+` to
+ * IP-keyed limiters use `ipKeyGenerator` from `express-rate-limit@7.4+` to
  * bucket IPv4 and IPv4-mapped IPv6 correctly (CVE-2026-30827 — older
  * versions silently collapsed all IPv4-mapped IPv6 addresses into
  * one bucket, which let attackers bypass the limiter).
@@ -162,6 +165,23 @@ export const passwordUpdateLimiter = rateLimit({
     limit: 10,
     skip: devApiKeySkipsRateLimits,
     skipSuccessfulRequests: true,
+    standardHeaders: "draft-7",
+    windowMs: 15 * 60 * 1000,
+});
+
+/**
+ * Migration operations can trigger signed federation requests and durable
+ * imports. Keep their cost bounded per authenticated account while allowing a
+ * user to retry a partially deferred import after enrolling another device.
+ */
+export const migrationLimiter = rateLimit({
+    keyGenerator: (req) =>
+        req.user?.userID
+            ? `migration:${req.user.userID}`
+            : `invalid:${keyByIp(req)}`,
+    legacyHeaders: false,
+    limit: 20,
+    skip: devApiKeySkipsRateLimits,
     standardHeaders: "draft-7",
     windowMs: 15 * 60 * 1000,
 });

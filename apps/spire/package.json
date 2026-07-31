@@ -109,7 +109,9 @@
         "multer": "2.2.0",
         "parse-duration": "2.1.6",
         "tweetnacl": "1.0.3",
+        "undici": "catalog:",
         "uuid": "catalog:",
+        "viem": "catalog:",
         "ws": "8.21.0",
         "zod": "catalog:"
     }

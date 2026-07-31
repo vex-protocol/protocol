@@ -6,6 +6,7 @@
 
 import type { SpireOptions } from "./Spire.ts";
 
+import { evmRegistryOptionsFromEnv } from "./registry/config.ts";
 import { Spire } from "./Spire.ts";
 import { loadEnv } from "./utils/loadEnv.ts";
 
@@ -29,9 +30,11 @@ function main() {
         }
     }
     const dbType = parseDbType(process.env["DB_TYPE"]);
+    const identityRegistry = evmRegistryOptionsFromEnv(process.env);
     const options: SpireOptions = {
         ...(apiPort !== undefined ? { apiPort } : {}),
         ...(dbType !== undefined ? { dbType } : {}),
+        ...(identityRegistry ? { identityRegistry } : {}),
     };
 
     new Spire(spk, options);

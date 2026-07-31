@@ -108,6 +108,30 @@ export interface EmojisTable {
 
 export type EmojiUpdate = Updateable<EmojisTable>;
 
+export interface FederationNoncesTable {
+    expiresAt: number;
+    nonce: string;
+    originHomeserverId: string;
+}
+
+export interface FederationRoomOutboxTable {
+    attempts: number;
+    createdAt: number;
+    destinationHomeserverId: string;
+    eventId: string;
+    kind: string;
+    nextAttemptAt: number;
+    payload: string;
+}
+
+export interface FederationRoomTombstonesTable {
+    deletedAt: number;
+    homeserverId: string;
+    permanent: number;
+    revision: number;
+    serverId: string;
+}
+
 export type FileRow = Selectable<FilesTable>;
 
 export interface FilesTable {
@@ -120,10 +144,24 @@ export type FileUpdate = Updateable<FilesTable>;
 
 // ── Database schema ─────────────────────────────────────────────────────
 
-export type InviteRow = Selectable<InvitesTable>;
+export interface HomeserverMigrationsTable {
+    accountId: string;
+    authorization: string;
+    completedAt: null | number;
+    createdAt: number;
+    destinationHomeserverId: string;
+    deviceKey: string;
+    mailCutoffAt: null | number;
+    manifest: null | string;
+    migrationId: string;
+    nonce: string;
+    sourceHomeserverId: string;
+    transferExpiresAt: number;
+}
 
 // ── Row utility types ───────────────────────────────────────────────────
 
+export type InviteRow = Selectable<InvitesTable>;
 export interface InvitesTable {
     expiration: string;
     inviteID: string;
@@ -136,6 +174,7 @@ export type MailRow = Selectable<MailTable>;
 export interface MailTable {
     authorID: string;
     cipher: string;
+    deliveryDeviceID: null | string;
     extra: null | string;
     forward: number;
     group: null | string;
@@ -238,6 +277,50 @@ export interface PreKeysTable {
     userID: string;
 }
 export type PreKeyUpdate = Updateable<PreKeysTable>;
+
+export interface RegistryAccountsTable {
+    accountId: string;
+    activeDeviceCount: number;
+    deviceThreshold: number;
+    epoch: string;
+    homeserverId: string;
+    nonce: string;
+    recoveryCommitment: string;
+    source: string;
+}
+
+export interface RegistryCursorsTable {
+    checkpoint: string;
+    sequence: string;
+    source: string;
+}
+
+export interface RegistryDevicesTable {
+    accountId: string;
+    active: number;
+    addedAtEpoch: string;
+    deviceKey: string;
+    revokedAtEpoch: null | string;
+    source: string;
+}
+
+export interface RegistryHomeserversTable {
+    active: number;
+    endpoint: string;
+    epoch: string;
+    homeserverId: string;
+    nonce: string;
+    signingKey: string;
+    source: string;
+}
+
+export interface RegistryUsernamesTable {
+    accountId: string;
+    nameHash: string;
+    source: string;
+    username: string;
+}
+
 export interface ServerDatabase {
     account_entitlements: AccountEntitlementsTable;
     billing_store_subscriptions: BillingStoreSubscriptionsTable;
@@ -246,7 +329,11 @@ export interface ServerDatabase {
     device_passkey_approvals: DevicePasskeyApprovalsTable;
     devices: DevicesTable;
     emojis: EmojisTable;
+    federation_nonces: FederationNoncesTable;
+    federation_room_outbox: FederationRoomOutboxTable;
+    federation_room_tombstones: FederationRoomTombstonesTable;
     files: FilesTable;
+    homeserver_migrations: HomeserverMigrationsTable;
     invites: InvitesTable;
     mail: MailTable;
     notification_subscriptions: NotificationSubscriptionsTable;
@@ -254,6 +341,11 @@ export interface ServerDatabase {
     passkeys: PasskeysTable;
     permissions: PermissionsTable;
     preKeys: PreKeysTable;
+    registry_accounts: RegistryAccountsTable;
+    registry_cursors: RegistryCursorsTable;
+    registry_devices: RegistryDevicesTable;
+    registry_homeservers: RegistryHomeserversTable;
+    registry_usernames: RegistryUsernamesTable;
     servers: ServersTable;
     service_metrics: ServiceMetricsTable;
     users: UsersTable;
@@ -261,8 +353,10 @@ export interface ServerDatabase {
 
 export type ServerRow = Selectable<ServersTable>;
 export interface ServersTable {
+    homeserverId: null | string;
     icon: null | string;
     name: string;
+    revision: number;
     serverID: string;
 }
 export type ServerUpdate = Updateable<ServersTable>;

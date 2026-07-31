@@ -5,7 +5,13 @@
  */
 
 import type { Database } from "../Database.ts";
-import type { Device, Emoji } from "@vex-chat/types";
+import type { HomeserverMigrationService } from "../federation/HomeserverMigrationService.ts";
+import type {
+    Device,
+    Emoji,
+    FederationRoomSnapshot,
+    Invite,
+} from "@vex-chat/types";
 
 import * as fs from "node:fs";
 import * as fsp from "node:fs/promises";
@@ -14,6 +20,7 @@ import express from "express";
 
 import { type KeyPair, XUtils } from "@vex-chat/crypto";
 import {
+    formatFederationInviteReference,
     MAX_FILE_UPLOAD_ENCODED_BODY_BYTES,
     PreKeysWSSchema,
     TokenScopes,
@@ -29,6 +36,10 @@ import { stringify as uuidStringify } from "uuid";
 import { z } from "zod/v4";
 
 import { POWER_LEVELS } from "../ClientManager.ts";
+import {
+    type FederationService,
+    FederationServiceError,
+} from "../federation/FederationService.ts";
 import { JWT_EXPIRY } from "../Spire.ts";
 import { signAuthJwt, verifyAuthJwt } from "../utils/authJwt.ts";
 import { msgpack } from "../utils/msgpack.ts";
@@ -40,8 +51,14 @@ import { getBillingRouter } from "./billing.ts";
 import { getCliPasskeyPageRouter } from "./cliPasskeyPage.ts";
 import { getEntitlementRouter } from "./entitlements.ts";
 import { errorHandler } from "./errors.ts";
+import {
+    type FederationRouterOptions,
+    getFederationRouter,
+} from "./federation.ts";
 import { getFileRouter } from "./file.ts";
+import { ALLOWED_IMAGE_TYPES } from "./imageTypes.ts";
 import { getInviteRouter } from "./invite.ts";
+import { getMigrationRouter } from "./migration.ts";
 import { setupDocs } from "./openapi.ts";
 import { getPasskeyRouter } from "./passkey.ts";
 import { getPasskeyDeviceRouter } from "./passkeyDevices.ts";
@@ -52,6 +69,7 @@ import {
     hasPermission,
     userHasPermission,
 } from "./permissions.ts";
+import { publicPeerDevice } from "./publicDevice.ts";
 import { globalLimiter, keyBundleLimiter, uploadLimiter } from "./rateLimit.ts";
 import { deleteServerIconFile, getServerIconRouter } from "./serverIcon.ts";
 import { getUserRouter } from "./user.ts";
@@ -61,14 +79,10 @@ import { getWellKnownRouter } from "./wellKnown.ts";
 // expiry of regkeys
 export const EXPIRY_TIME = 1000 * 60 * 5;
 
-export const ALLOWED_IMAGE_TYPES = [
-    "image/jpeg",
-    "image/png",
-    "image/gif",
-    "image/apng",
-    "image/avif",
-    "image/webp",
-];
+interface FederationAppOptions extends FederationRouterOptions {
+    migration: HomeserverMigrationService;
+    service: FederationService;
+}
 
 // ── Zod schemas for trust-boundary validation ──────────────────────────
 const invitePayload = z.object({
@@ -89,6 +103,9 @@ const permissionRolePayload = z.object({
 });
 
 const deviceListPayload = z.array(z.string().min(1).max(128)).max(256);
+const keyBundlePayload = z
+    .object({ accountId: z.string().min(1).max(128).optional() })
+    .default({});
 
 const connectPayload = z.object({
     signed: z.custom<Uint8Array>(
@@ -236,6 +253,32 @@ export function createCheckPasskey(
     };
 }
 
+export function createCheckRegistryIdentity(
+    federation: FederationService,
+): express.RequestHandler {
+    return async (req, _res, next) => {
+        if (req.user) {
+            try {
+                const authorized = await federation.authorizeLocalSession(
+                    req.user.userID,
+                    req.device,
+                );
+                if (!authorized) clearRequestAuthentication(req);
+            } catch {
+                clearRequestAuthentication(req);
+            }
+        }
+        next();
+    };
+}
+
+function clearRequestAuthentication(request: express.Request): void {
+    delete request.bearerToken;
+    delete request.device;
+    delete request.passkey;
+    delete request.user;
+}
+
 async function currentTokenDevice(
     db: Pick<Database, "retrieveDevice">,
     tokenDevice: Device,
@@ -293,6 +336,19 @@ export const msgpackParser: express.RequestHandler = (req, res, next) => {
     next();
 };
 
+function sendFederationServiceError(
+    response: express.Response,
+    error: unknown,
+): void {
+    if (error instanceof FederationServiceError) {
+        response.status(error.status).json({ error: error.message });
+        return;
+    }
+    response
+        .status(502)
+        .json({ error: "The authoritative homeserver could not be reached." });
+}
+
 const directories = ["files", "avatars", "server-icons"];
 for (const dir of directories) {
     if (!fs.existsSync(dir)) {
@@ -313,18 +369,30 @@ export const initApp = (
         deviceID?: string,
     ) => void,
     disconnectDevices?: (deviceIDs: string[]) => void,
+    federation?: FederationAppOptions,
 ) => {
     const notifyServerChange = async (
         serverID: string,
         additionalUserIDs: readonly string[] = [],
+        previousSnapshot?: FederationRoomSnapshot,
     ): Promise<void> => {
-        const affectedUsers = await db.retrieveAffectedUsers(serverID);
+        const [affectedUsers, snapshot] = await Promise.all([
+            db.retrieveAffectedUsers(serverID),
+            db.retrieveRoomSnapshot(serverID),
+        ]);
         const userIDs = new Set([
             ...affectedUsers.map((user) => user.userID),
             ...additionalUserIDs,
         ]);
         for (const userID of userIDs) {
             notify(userID, "serverChange", crypto.randomUUID(), serverID);
+        }
+        if (
+            federation &&
+            snapshot?.server.homeserverId === federation.homeserverId &&
+            federation.roomChanged
+        ) {
+            await federation.roomChanged(snapshot, previousSnapshot);
         }
     };
 
@@ -334,15 +402,39 @@ export const initApp = (
         tokenValidator,
         notify,
         disconnectDevices,
+        federation?.service,
     );
     const fileRouter = getFileRouter(db);
-    const avatarRouter = getAvatarRouter();
+    const avatarRouter = getAvatarRouter(federation?.service);
     const billingRouter = getBillingRouter(db, notify);
     const entitlementRouter = getEntitlementRouter(db, notify);
-    const inviteRouter = getInviteRouter(db, tokenValidator, notify);
+    const inviteRouter = getInviteRouter(
+        db,
+        tokenValidator,
+        notify,
+        notifyServerChange,
+        federation
+            ? {
+                  homeserverId: federation.homeserverId,
+                  service: federation.service,
+              }
+            : undefined,
+    );
+    const migrationRouter = federation
+        ? getMigrationRouter(federation.migration)
+        : null;
     const passkeyRouter = getPasskeyRouter(db);
     const passwordRouter = getPasswordRouter(db);
-    const serverIconRouter = getServerIconRouter(db, notifyServerChange);
+    const serverIconRouter = getServerIconRouter(
+        db,
+        notifyServerChange,
+        federation
+            ? {
+                  homeserverId: federation.homeserverId,
+                  service: federation.service,
+              }
+            : undefined,
+    );
     const passkeyDeviceRouter = getPasskeyDeviceRouter(
         db,
         notify,
@@ -363,6 +455,9 @@ export const initApp = (
     // spends any cycles on body parsing, helmet, or auth. See
     // src/server/rateLimit.ts.
     api.use(globalLimiter);
+    if (federation) {
+        api.use("/_vex/federation/v1", getFederationRouter(federation));
+    }
     // Base64 expands a 25 MiB encrypted upload to about 33.4 MiB. Give only
     // the JSON fallback route enough room for that encoded payload and its
     // JSON/msgpack envelope; unrelated routes keep the tighter global cap.
@@ -424,6 +519,9 @@ export const initApp = (
     api.use(checkAuth);
     api.use(createCheckPasskey(db));
     api.use(createCheckDevice(db));
+    if (federation) {
+        api.use(createCheckRegistryIdentity(federation.service));
+    }
 
     api.get("/server/:id", protect, async (req, res) => {
         const serverID = getParam(req, "id");
@@ -435,7 +533,23 @@ export const initApp = (
         if (!hasAnyPermission(permissions, serverID)) {
             return res.sendStatus(403);
         }
-        const server = await db.retrieveServer(serverID);
+        let server = await db.retrieveServer(serverID);
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                await federation.service.refreshRoom(
+                    serverID,
+                    userDetails.userID,
+                );
+                server = await db.retrieveServer(serverID);
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+                return;
+            }
+        }
 
         if (server) {
             return res.send(msgpack.encode(server));
@@ -455,6 +569,31 @@ export const initApp = (
         }
 
         const serverID = getParam(req, "id");
+        const existingServer = await db.retrieveServer(serverID);
+        if (!existingServer) {
+            res.sendStatus(404);
+            return;
+        }
+        if (
+            federation &&
+            existingServer.homeserverId !== undefined &&
+            existingServer.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    serverID,
+                    getUser(req).userID,
+                    { name: parsed.data.name, type: "rename-server" },
+                );
+                if (result.resultType !== "server") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.send(msgpack.encode(result.server));
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
         const permissions = await db.retrievePermissions(
             getUser(req).userID,
             "server",
@@ -486,6 +625,7 @@ export const initApp = (
         const server = await db.createServer(
             parsed.data.name,
             getUser(req).userID,
+            federation?.homeserverId,
         );
         res.send(msgpack.encode(server));
     });
@@ -520,6 +660,7 @@ export const initApp = (
         const server = await db.createServer(
             parsedName.data,
             userDetails.userID,
+            federation?.homeserverId,
         );
         res.send(msgpack.encode(server));
     });
@@ -568,13 +709,52 @@ export const initApp = (
 
         const expires = new Date(Date.now() + duration);
 
+        if (
+            federation &&
+            serverEntry.homeserverId !== undefined &&
+            serverEntry.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    serverEntry.serverID,
+                    userDetails.userID,
+                    { durationMs: duration, type: "create-invite" },
+                );
+                if (result.resultType !== "invite") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.send(
+                    msgpack.encode({
+                        ...result.invite,
+                        inviteID: formatFederationInviteReference(
+                            serverEntry.homeserverId,
+                            result.invite.inviteID,
+                        ),
+                    }),
+                );
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
+
         const invite = await db.createInvite(
             crypto.randomUUID(),
             serverEntry.serverID,
             userDetails.userID,
             expires.toString(),
         );
-        res.send(msgpack.encode(invite));
+        res.send(
+            msgpack.encode({
+                ...invite,
+                inviteID: serverEntry.homeserverId
+                    ? formatFederationInviteReference(
+                          serverEntry.homeserverId,
+                          invite.inviteID,
+                      )
+                    : invite.inviteID,
+            }),
+        );
     });
 
     api.get("/server/:serverID/invites", protect, async (req, res) => {
@@ -596,10 +776,39 @@ export const initApp = (
             return;
         }
 
-        const inviteList = await db.retrieveServerInvites(
-            getParam(req, "serverID"),
+        const serverID = getParam(req, "serverID");
+        const server = await db.retrieveServer(serverID);
+        let inviteList: Invite[];
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                inviteList = await federation.service.queryRoomInvites(
+                    serverID,
+                    userDetails.userID,
+                );
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+                return;
+            }
+        } else {
+            inviteList = await db.retrieveServerInvites(serverID);
+        }
+        res.send(
+            msgpack.encode(
+                inviteList.map((invite) => ({
+                    ...invite,
+                    inviteID: server?.homeserverId
+                        ? formatFederationInviteReference(
+                              server.homeserverId,
+                              invite.inviteID,
+                          )
+                        : invite.inviteID,
+                })),
+            ),
         );
-        res.send(msgpack.encode(inviteList));
     });
 
     api.delete("/server/:id", protect, async (req, res) => {
@@ -609,15 +818,43 @@ export const initApp = (
             userDetails.userID,
             "server",
         );
-        if (hasPermission(permissions, serverID, POWER_LEVELS.DELETE)) {
+        if (hasPermission(permissions, serverID, 100)) {
             const server = await db.retrieveServer(serverID);
             if (!server) {
                 res.sendStatus(404);
                 return;
             }
+            if (
+                federation &&
+                server.homeserverId !== undefined &&
+                server.homeserverId !== federation.homeserverId
+            ) {
+                try {
+                    const result = await federation.service.mutateRoom(
+                        serverID,
+                        userDetails.userID,
+                        { type: "delete-server" },
+                    );
+                    if (result.resultType !== "deleted") {
+                        throw new Error("Unexpected room mutation result.");
+                    }
+                    res.sendStatus(200);
+                } catch (error: unknown) {
+                    sendFederationServiceError(res, error);
+                }
+                return;
+            }
             const affectedUsers = await db.retrieveAffectedUsers(serverID);
+            const snapshot = await db.retrieveRoomSnapshot(serverID);
             await db.deleteServer(serverID);
             if (server.icon) await deleteServerIconFile(server.icon);
+            if (
+                federation &&
+                snapshot?.server.homeserverId === federation.homeserverId &&
+                federation.roomDeleted
+            ) {
+                await federation.roomDeleted(snapshot);
+            }
             await notifyServerChange(
                 serverID,
                 affectedUsers.map((user) => user.userID),
@@ -641,6 +878,27 @@ export const initApp = (
             return;
         }
         const { name } = parsedBody.data;
+        const server = await db.retrieveServer(serverID);
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    serverID,
+                    userDetails.userID,
+                    { name, type: "create-channel" },
+                );
+                if (result.resultType !== "channel") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.send(msgpack.encode(result.channel));
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
         const permissions = await db.retrievePermissions(
             userDetails.userID,
             "server",
@@ -662,6 +920,22 @@ export const initApp = (
             "server",
         );
         if (hasAnyPermission(permissions, serverID)) {
+            const server = await db.retrieveServer(serverID);
+            if (
+                federation &&
+                server?.homeserverId !== undefined &&
+                server.homeserverId !== federation.homeserverId
+            ) {
+                try {
+                    await federation.service.refreshRoom(
+                        serverID,
+                        userDetails.userID,
+                    );
+                } catch (error: unknown) {
+                    sendFederationServiceError(res, error);
+                    return;
+                }
+            }
             const channels = await db.retrieveChannels(serverID);
             res.send(msgpack.encode(channels));
             return;
@@ -686,6 +960,22 @@ export const initApp = (
     api.get("/server/:serverID/permissions", protect, async (req, res) => {
         const userDetails = getUser(req);
         const serverID = getParam(req, "serverID");
+        const server = await db.retrieveServer(serverID);
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                await federation.service.refreshRoom(
+                    serverID,
+                    userDetails.userID,
+                );
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+                return;
+            }
+        }
         const permissions = await db.retrievePermissionsByResourceID(serverID);
         const canSee = permissions.some(
             (perm) => perm.userID === userDetails.userID,
@@ -724,6 +1014,32 @@ export const initApp = (
             return;
         }
 
+        const server = await db.retrieveServer(channel.serverID);
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    channel.serverID,
+                    getUser(req).userID,
+                    {
+                        channelId: channel.channelID,
+                        name: parsed.data.name,
+                        type: "rename-channel",
+                    },
+                );
+                if (result.resultType !== "channel") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.send(msgpack.encode(result.channel));
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
+
         const updated = await db.updateChannel(channelID, parsed.data.name);
         if (!updated) {
             res.sendStatus(404);
@@ -748,6 +1064,30 @@ export const initApp = (
             userDetails.userID,
             "server",
         );
+        const server = await db.retrieveServer(channel.serverID);
+        if (
+            federation &&
+            server?.homeserverId !== undefined &&
+            server.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    channel.serverID,
+                    userDetails.userID,
+                    {
+                        channelId: channel.channelID,
+                        type: "delete-channel",
+                    },
+                );
+                if (result.resultType !== "channel") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.sendStatus(200);
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
         for (const permission of permissions) {
             if (
                 permission.resourceID === channel.serverID &&
@@ -807,6 +1147,32 @@ export const initApp = (
             return;
         }
 
+        const targetServer = await db.retrieveServer(target.resourceID);
+        if (
+            federation &&
+            targetServer?.homeserverId !== undefined &&
+            targetServer.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    target.resourceID,
+                    getUser(req).userID,
+                    {
+                        permissionId: target.permissionID,
+                        powerLevel: parsed.data.powerLevel,
+                        type: "update-member",
+                    },
+                );
+                if (result.resultType !== "permission") {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.send(msgpack.encode(result.permission));
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
+
         const actor = getUser(req);
         if (target.userID === actor.userID) {
             res.status(400).json({
@@ -844,6 +1210,37 @@ export const initApp = (
             return;
         }
 
+        const permissionServer =
+            permToDelete.resourceType === "server"
+                ? await db.retrieveServer(permToDelete.resourceID)
+                : null;
+        if (
+            federation &&
+            permissionServer?.homeserverId !== undefined &&
+            permissionServer.homeserverId !== federation.homeserverId
+        ) {
+            try {
+                const result = await federation.service.mutateRoom(
+                    permToDelete.resourceID,
+                    userDetails.userID,
+                    {
+                        permissionId: permToDelete.permissionID,
+                        type: "remove-member",
+                    },
+                );
+                if (
+                    result.resultType !== "permission" &&
+                    result.resultType !== "left"
+                ) {
+                    throw new Error("Unexpected room mutation result.");
+                }
+                res.sendStatus(200);
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
+
         const permissions = await db.retrievePermissions(
             userDetails.userID,
             permToDelete.resourceType,
@@ -877,11 +1274,17 @@ export const initApp = (
                     return;
                 }
             }
+            const previousSnapshot =
+                permToDelete.resourceType === "server"
+                    ? await db.retrieveRoomSnapshot(permToDelete.resourceID)
+                    : undefined;
             await db.deletePermission(permToDelete.permissionID);
             if (permToDelete.resourceType === "server") {
-                await notifyServerChange(permToDelete.resourceID, [
-                    permToDelete.userID,
-                ]);
+                await notifyServerChange(
+                    permToDelete.resourceID,
+                    [permToDelete.userID],
+                    previousSnapshot ?? undefined,
+                );
             }
             res.sendStatus(200);
             return;
@@ -892,6 +1295,19 @@ export const initApp = (
     api.post("/userList/:channelID", protect, async (req, res) => {
         const userDetails = getUser(req);
         const channelID = getParam(req, "channelID");
+
+        if (federation) {
+            try {
+                const groupMembers = await federation.service.resolveRoomUsers(
+                    channelID,
+                    userDetails.userID,
+                );
+                res.send(msgpack.encode(groupMembers));
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
+            }
+            return;
+        }
 
         const channel = await db.retrieveChannel(channelID);
         if (!channel) {
@@ -925,15 +1341,31 @@ export const initApp = (
             });
             return;
         }
-        const devices = await db.retrieveUserDeviceList(parsed.data);
-        res.send(msgpack.encode(devices));
+        try {
+            const devices = federation
+                ? (
+                      await Promise.all(
+                          parsed.data.map((id) =>
+                              federation.service.resolveDevices(id),
+                          ),
+                      )
+                  ).flatMap((entries) => entries ?? [])
+                : await db.retrieveUserDeviceList(parsed.data);
+            res.send(msgpack.encode(devices.map(publicPeerDevice)));
+        } catch (error: unknown) {
+            sendFederationServiceError(res, error);
+        }
     });
 
     api.get("/device/:id", protect, async (req, res) => {
         const device = await db.retrieveDevice(getParam(req, "id"));
 
         if (device) {
-            return res.send(msgpack.encode(device));
+            const visible =
+                device.owner === getUser(req).userID
+                    ? device
+                    : publicPeerDevice(device);
+            return res.send(msgpack.encode(visible));
         } else {
             return res.sendStatus(404);
         }
@@ -945,14 +1377,35 @@ export const initApp = (
         keyBundleLimiter,
         async (req, res) => {
             try {
-                const keyBundle = await db.getKeyBundle(getParam(req, "id"));
+                const deviceId = getParam(req, "id");
+                const parsed = keyBundlePayload.safeParse(req.body);
+                if (!parsed.success) {
+                    res.status(400).json({
+                        error: "Invalid key-bundle request",
+                        issues: parsed.error.issues,
+                    });
+                    return;
+                }
+                let accountId = parsed.data.accountId;
+                if (federation && !accountId) {
+                    accountId = (await db.retrieveDevice(deviceId))?.owner;
+                }
+                const keyBundle = federation
+                    ? accountId
+                        ? await federation.service.retrieveKeyBundle(
+                              getUser(req).userID,
+                              accountId,
+                              deviceId,
+                          )
+                        : null
+                    : await db.getKeyBundle(deviceId);
                 if (keyBundle) {
                     res.send(msgpack.encode(keyBundle));
                 } else {
                     res.sendStatus(404);
                 }
-            } catch {
-                res.sendStatus(500);
+            } catch (error: unknown) {
+                sendFederationServiceError(res, error);
             }
         },
     );
@@ -1370,6 +1823,7 @@ export const initApp = (
     api.use(passkeyRouter);
     api.use(passkeyDeviceRouter);
     api.use(passwordRouter);
+    if (migrationRouter) api.use(migrationRouter);
 
     api.use("/user", userRouter);
 
