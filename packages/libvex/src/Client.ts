@@ -2931,18 +2931,32 @@ export class Client {
                 type: "resource",
             };
 
+            // If a session for this device already exists with the same
+            // fingerprint, the identity keys are unchanged, so carry over
+            // its verification state; a different fingerprint means a
+            // genuine key change and resets it.
+            const initiatorFingerprint = XUtils.encodeHex(AD);
+            const priorSession = await this.database.getSessionByDeviceID(
+                device.deviceID,
+            );
+            const initiatorVerified =
+                priorSession !== null &&
+                priorSession.verified &&
+                XUtils.encodeHex(priorSession.fingerprint) ===
+                    initiatorFingerprint;
+
             const ratchet = await initRatchetSession(SK, "initiator");
             const sessionEntry: SessionSQL = {
                 ...ratchet,
                 deviceID: device.deviceID,
-                fingerprint: XUtils.encodeHex(AD),
+                fingerprint: initiatorFingerprint,
                 lastUsed: new Date().toISOString(),
                 mode: "initiator",
                 publicKey: XUtils.encodeHex(PK),
                 sessionID: uuid.v4(),
                 SK: XUtils.encodeHex(SK),
                 userID: user.userID,
-                verified: false,
+                verified: initiatorVerified,
             };
 
             await this.database.saveSession(sessionEntry);
@@ -4630,6 +4644,24 @@ export class Client {
                             );
                             return;
                         }
+
+                        // Replay guard: X3DH is deterministic, so a replayed
+                        // initial mail re-derives the exact SK/PK of the
+                        // session it already created. If a session with this
+                        // publicKey exists, this mail was already processed —
+                        // acknowledge it so the server stops redelivering, but
+                        // do NOT re-emit the message or save a fresh session
+                        // (which would roll back the ratchet and strip the
+                        // `verified` flag). A genuine new session always uses
+                        // a fresh ephemeral key, hence a fresh SK/PK, so this
+                        // never matches first-time mail.
+                        const replayedSession =
+                            await this.database.getSessionByPublicKey(PK);
+                        if (replayedSession) {
+                            this.acknowledgeInboundMail(mail);
+                            return;
+                        }
+
                         const unsealed = await xSecretboxOpenAsync(
                             new Uint8Array(mail.cipher),
                             new Uint8Array(mail.nonce),
@@ -4730,7 +4762,22 @@ export class Client {
                             this.deviceRecords[deviceEntry.deviceID] =
                                 deviceEntry;
 
-                            // save session
+                            // save session. If a session for this device
+                            // already exists with the same fingerprint, the
+                            // identity keys are unchanged, so carry over its
+                            // verification state; a different fingerprint
+                            // means a genuine key change and resets it.
+                            const receiverFingerprint = XUtils.encodeHex(AD);
+                            const priorSession =
+                                await this.database.getSessionByDeviceID(
+                                    mail.sender,
+                                );
+                            const receiverVerified =
+                                priorSession !== null &&
+                                priorSession.verified &&
+                                XUtils.encodeHex(priorSession.fingerprint) ===
+                                    receiverFingerprint;
+
                             const ratchet = await initRatchetSession(
                                 SK,
                                 "receiver",
@@ -4738,14 +4785,14 @@ export class Client {
                             const newSession: SessionSQL = {
                                 ...ratchet,
                                 deviceID: mail.sender,
-                                fingerprint: XUtils.encodeHex(AD),
+                                fingerprint: receiverFingerprint,
                                 lastUsed: new Date().toISOString(),
                                 mode: "receiver",
                                 publicKey: XUtils.encodeHex(PK),
                                 sessionID: uuid.v4(),
                                 SK: XUtils.encodeHex(SK),
                                 userID: userEntry.userID,
-                                verified: false,
+                                verified: receiverVerified,
                             };
                             await this.database.saveSession(newSession);
 

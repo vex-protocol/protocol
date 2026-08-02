@@ -18,6 +18,7 @@ export default defineConfig({
                         "src/__tests__/codec.test.ts",
                         "src/__tests__/dm-own-device-forward.test.ts",
                         "src/__tests__/http.test.ts",
+                        "src/__tests__/initial-mail-replay.test.ts",
                         "src/__tests__/multi-device-delivery.test.ts",
                         "src/__tests__/ratchet.test.ts",
                         "src/__tests__/retention.test.ts",
