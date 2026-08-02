@@ -3940,7 +3940,17 @@ export class Client {
             });
 
             this.socket.on("message", (message: Uint8Array) => {
-                const [_header, raw] = XUtils.unpackMessage(message);
+                // XUtils.unpackMessage runs msgpack + zod over server-controlled
+                // bytes and throws on malformed frames. A hostile or buggy
+                // server must not crash the host process — drop the frame,
+                // mirroring the safeParse failure path below.
+                let unpacked: ReturnType<typeof XUtils.unpackMessage>;
+                try {
+                    unpacked = XUtils.unpackMessage(message);
+                } catch {
+                    return;
+                }
+                const [_header, raw] = unpacked;
 
                 const parseResult = WSMessageSchema.safeParse(raw);
                 if (!parseResult.success) {

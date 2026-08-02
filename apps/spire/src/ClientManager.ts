@@ -236,7 +236,31 @@ export class ClientManager extends EventEmitter {
                 return;
             }
 
-            const [header, msg] = unpackMessage(message);
+            // unpackMessage() runs msgpackr over attacker-controlled bytes and
+            // throws on malformed input. A single garbage frame must never
+            // escape as an uncaughtException and kill the process — report the
+            // error and drop the misbehaving client instead.
+            let header: Uint8Array;
+            let msg: BaseMsg;
+            try {
+                [header, msg] = unpackMessage(message);
+                // msgpackr happily decodes `nil` (0xc0) and primitives; those
+                // are not message objects, and dereferencing their fields
+                // below would throw out of the listener and crash the process
+                // just like a malformed frame would. unpackMessage() types
+                // the body as BaseMsg, but at runtime it is attacker input.
+                const decodedBody: unknown = msg;
+                if (decodedBody === null || typeof decodedBody !== "object") {
+                    throw new Error("Message body is not an object.");
+                }
+            } catch {
+                this.sendErr(
+                    "00000000-0000-0000-0000-000000000000",
+                    "Malformed message frame.",
+                );
+                this.fail();
+                return;
+            }
 
             if (!msg.type) {
                 this.sendErr(msg.transmissionID, "Message type is required.");
@@ -429,35 +453,45 @@ export class ClientManager extends EventEmitter {
     }
 
     private async verifyResponse(msg: RespMsg) {
-        const user = await this.db.retrieveUser(this.userDetails.userID);
-        if (user) {
-            const devices = await this.db.retrieveUserDeviceList([user.userID]);
-            let message: null | Uint8Array = null;
-            for (const device of devices) {
-                const verified = await spireXSignOpenAsync(
-                    msg.signed,
-                    XUtils.decodeHex(device.signKey),
-                );
-                if (verified) {
-                    message = verified;
-                    this.device = device;
+        // Runs as a `void`-ed async event handler: any rejection here (DB
+        // outage, decode failure) would surface as an unhandledRejection and
+        // take down the process. Fail the connection instead.
+        try {
+            const user = await this.db.retrieveUser(this.userDetails.userID);
+            if (user) {
+                const devices = await this.db.retrieveUserDeviceList([
+                    user.userID,
+                ]);
+                let message: null | Uint8Array = null;
+                for (const device of devices) {
+                    const verified = await spireXSignOpenAsync(
+                        msg.signed,
+                        XUtils.decodeHex(device.signKey),
+                    );
+                    if (verified) {
+                        message = verified;
+                        this.device = device;
+                    }
                 }
-            }
-            if (!message) {
-                this.sendAuthError(SocketAuthErrors.BadSignature);
-                this.fail();
-                return;
-            }
+                if (!message) {
+                    this.sendAuthError(SocketAuthErrors.BadSignature);
+                    this.fail();
+                    return;
+                }
 
-            if (XUtils.bytesEqual(this.challengeID, message)) {
-                this.user = user;
-                this.authorize(msg.transmissionID);
+                if (XUtils.bytesEqual(this.challengeID, message)) {
+                    this.user = user;
+                    this.authorize(msg.transmissionID);
+                } else {
+                    this.sendAuthError(SocketAuthErrors.InvalidToken);
+                }
             } else {
-                this.sendAuthError(SocketAuthErrors.InvalidToken);
-            }
-        } else {
-            this.sendAuthError(SocketAuthErrors.UserNotRegistered);
+                this.sendAuthError(SocketAuthErrors.UserNotRegistered);
 
+                this.fail();
+            }
+        } catch {
+            this.sendErr(msg.transmissionID, "Authentication failed.");
             this.fail();
         }
     }
