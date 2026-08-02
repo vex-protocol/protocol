@@ -428,4 +428,92 @@ describe("initial mail replay guard", () => {
         expect(second?.fingerprint).toBe(first.fingerprint);
         expect(second?.verified).toBe(true);
     });
+
+    it("preserves verified when the peer initiates the re-session (role reversal)", async () => {
+        const storage = new MemoryStorage(new Uint8Array(32).fill(5));
+        await storage.init();
+
+        const alice = makeIdentity();
+        const aliceRing = await makeKeyRing(alice);
+        const aliceUser = makeUser("user-a", "alice");
+        const aliceDevice = makeDevice(
+            "device-a-1",
+            aliceUser.userID,
+            alice.signKeys,
+        );
+
+        const bob = makeIdentity();
+        const bobUser = makeUser("user-b", "bob");
+        const bobDevice = makeDevice(
+            "device-b-1",
+            bobUser.userID,
+            bob.signKeys,
+        );
+        const bobBundle = await makeKeyBundle(bob, bobDevice.deviceID);
+
+        // Alice initiates: the stored fingerprint encodes the identities in
+        // handshake-role order, alice||bob.
+        const initiatorHarness = {
+            database: storage,
+            deliverMailResource: vi.fn(() => Promise.resolve()),
+            emitter: new EventEmitter(),
+            getDevice: () => aliceDevice,
+            getUser: () => aliceUser,
+            manuallyClosing: false,
+            retrieveKeyBundle: vi.fn(() => Promise.resolve(bobBundle)),
+            runCrypto: <T>(fn: () => Promise<T>): Promise<T> => {
+                return fn();
+            },
+            signKeys: alice.signKeys,
+            xKeyRing: aliceRing,
+        };
+        await clientMethods.createSession.call(
+            initiatorHarness,
+            bobDevice,
+            bobUser,
+            XUtils.decodeUTF8("hi bob"),
+            null,
+            null,
+            false,
+        );
+        const first = (await storage.getAllSessions())[0];
+        if (!first) {
+            throw new Error("Expected a session after the first send.");
+        }
+        await storage.markSessionVerified(first.sessionID);
+
+        // Bob initiates the replacement (e.g. healSession after a decrypt
+        // failure): the new handshake encodes the same identities in the
+        // reverse order, bob||alice.
+        const { harness: receiverHarness } = makeReceiverHarness({
+            receiverDevice: aliceDevice,
+            receiverRing: aliceRing,
+            senderDevice: bobDevice,
+            senderUser: bobUser,
+            storage,
+        });
+        const bounced = await craftInitialMail({
+            plaintext: "heal",
+            receiverRing: aliceRing,
+            recipientDeviceID: aliceDevice.deviceID,
+            recipientUserID: aliceUser.userID,
+            sender: bob,
+            senderDeviceID: bobDevice.deviceID,
+            senderUserID: bobUser.userID,
+        });
+        await clientMethods.readMail.call(
+            receiverHarness,
+            bounced.header,
+            bounced.mail,
+            NOW,
+        );
+
+        const sessions = await storage.getAllSessions();
+        expect(sessions).toHaveLength(2);
+        const second = sessions.find((s) => s.sessionID !== first.sessionID);
+        // Role-reversed fingerprint: not byte-identical, but the same
+        // identity-key pair, so verification must carry over.
+        expect(second?.fingerprint).not.toBe(first.fingerprint);
+        expect(second?.verified).toBe(true);
+    });
 });

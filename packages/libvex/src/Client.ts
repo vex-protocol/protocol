@@ -1999,6 +1999,29 @@ export class Client {
         }
     }
 
+    /**
+     * Session fingerprints are the two encoded identity keys in
+     * handshake-role order (initiator first). When the peer that received
+     * the previous handshake later initiates the replacement (e.g. via
+     * healSession), the same identities are encoded in the reverse order.
+     * Accept both orders so role-reversed re-sessions keep their
+     * verification state.
+     */
+    private static fingerprintsMatch(
+        storedFingerprint: Uint8Array,
+        currentAD: Uint8Array,
+    ): boolean {
+        if (XUtils.bytesEqual(storedFingerprint, currentAD)) {
+            return true;
+        }
+        const half = currentAD.length / 2;
+        const reversedAD = xConcat(
+            currentAD.slice(half),
+            currentAD.slice(0, half),
+        );
+        return XUtils.bytesEqual(storedFingerprint, reversedAD);
+    }
+
     private static getMnemonic(session: SessionSQL): string {
         return xMnemonic(xKDF(XUtils.decodeHex(session.fingerprint)));
     }
@@ -2934,7 +2957,10 @@ export class Client {
             // If a session for this device already exists with the same
             // fingerprint, the identity keys are unchanged, so carry over
             // its verification state; a different fingerprint means a
-            // genuine key change and resets it.
+            // genuine key change and resets it. Fingerprints are stored in
+            // handshake-role order, so accept the reversed order too —
+            // otherwise a session started by the other peer (e.g. via
+            // healSession) would silently drop verification.
             const initiatorFingerprint = XUtils.encodeHex(AD);
             const priorSession = await this.database.getSessionByDeviceID(
                 device.deviceID,
@@ -2942,8 +2968,7 @@ export class Client {
             const initiatorVerified =
                 priorSession !== null &&
                 priorSession.verified &&
-                XUtils.encodeHex(priorSession.fingerprint) ===
-                    initiatorFingerprint;
+                Client.fingerprintsMatch(priorSession.fingerprint, AD);
 
             const ratchet = await initRatchetSession(SK, "initiator");
             const sessionEntry: SessionSQL = {
@@ -4775,8 +4800,10 @@ export class Client {
                             const receiverVerified =
                                 priorSession !== null &&
                                 priorSession.verified &&
-                                XUtils.encodeHex(priorSession.fingerprint) ===
-                                    receiverFingerprint;
+                                Client.fingerprintsMatch(
+                                    priorSession.fingerprint,
+                                    AD,
+                                );
 
                             const ratchet = await initRatchetSession(
                                 SK,
