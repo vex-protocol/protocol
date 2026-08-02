@@ -1999,6 +1999,29 @@ export class Client {
         }
     }
 
+    /**
+     * Session fingerprints are the two encoded identity keys in
+     * handshake-role order (initiator first). When the peer that received
+     * the previous handshake later initiates the replacement (e.g. via
+     * healSession), the same identities are encoded in the reverse order.
+     * Accept both orders so role-reversed re-sessions keep their
+     * verification state.
+     */
+    private static fingerprintsMatch(
+        storedFingerprint: Uint8Array,
+        currentAD: Uint8Array,
+    ): boolean {
+        if (XUtils.bytesEqual(storedFingerprint, currentAD)) {
+            return true;
+        }
+        const half = currentAD.length / 2;
+        const reversedAD = xConcat(
+            currentAD.slice(half),
+            currentAD.slice(0, half),
+        );
+        return XUtils.bytesEqual(storedFingerprint, reversedAD);
+    }
+
     private static getMnemonic(session: SessionSQL): string {
         return xMnemonic(xKDF(XUtils.decodeHex(session.fingerprint)));
     }
@@ -2931,18 +2954,34 @@ export class Client {
                 type: "resource",
             };
 
+            // If a session for this device already exists with the same
+            // fingerprint, the identity keys are unchanged, so carry over
+            // its verification state; a different fingerprint means a
+            // genuine key change and resets it. Fingerprints are stored in
+            // handshake-role order, so accept the reversed order too —
+            // otherwise a session started by the other peer (e.g. via
+            // healSession) would silently drop verification.
+            const initiatorFingerprint = XUtils.encodeHex(AD);
+            const priorSession = await this.database.getSessionByDeviceID(
+                device.deviceID,
+            );
+            const initiatorVerified =
+                priorSession !== null &&
+                priorSession.verified &&
+                Client.fingerprintsMatch(priorSession.fingerprint, AD);
+
             const ratchet = await initRatchetSession(SK, "initiator");
             const sessionEntry: SessionSQL = {
                 ...ratchet,
                 deviceID: device.deviceID,
-                fingerprint: XUtils.encodeHex(AD),
+                fingerprint: initiatorFingerprint,
                 lastUsed: new Date().toISOString(),
                 mode: "initiator",
                 publicKey: XUtils.encodeHex(PK),
                 sessionID: uuid.v4(),
                 SK: XUtils.encodeHex(SK),
                 userID: user.userID,
-                verified: false,
+                verified: initiatorVerified,
             };
 
             await this.database.saveSession(sessionEntry);
@@ -4640,6 +4679,24 @@ export class Client {
                             );
                             return;
                         }
+
+                        // Replay guard: X3DH is deterministic, so a replayed
+                        // initial mail re-derives the exact SK/PK of the
+                        // session it already created. If a session with this
+                        // publicKey exists, this mail was already processed —
+                        // acknowledge it so the server stops redelivering, but
+                        // do NOT re-emit the message or save a fresh session
+                        // (which would roll back the ratchet and strip the
+                        // `verified` flag). A genuine new session always uses
+                        // a fresh ephemeral key, hence a fresh SK/PK, so this
+                        // never matches first-time mail.
+                        const replayedSession =
+                            await this.database.getSessionByPublicKey(PK);
+                        if (replayedSession) {
+                            this.acknowledgeInboundMail(mail);
+                            return;
+                        }
+
                         const unsealed = await xSecretboxOpenAsync(
                             new Uint8Array(mail.cipher),
                             new Uint8Array(mail.nonce),
@@ -4740,7 +4797,24 @@ export class Client {
                             this.deviceRecords[deviceEntry.deviceID] =
                                 deviceEntry;
 
-                            // save session
+                            // save session. If a session for this device
+                            // already exists with the same fingerprint, the
+                            // identity keys are unchanged, so carry over its
+                            // verification state; a different fingerprint
+                            // means a genuine key change and resets it.
+                            const receiverFingerprint = XUtils.encodeHex(AD);
+                            const priorSession =
+                                await this.database.getSessionByDeviceID(
+                                    mail.sender,
+                                );
+                            const receiverVerified =
+                                priorSession !== null &&
+                                priorSession.verified &&
+                                Client.fingerprintsMatch(
+                                    priorSession.fingerprint,
+                                    AD,
+                                );
+
                             const ratchet = await initRatchetSession(
                                 SK,
                                 "receiver",
@@ -4748,14 +4822,14 @@ export class Client {
                             const newSession: SessionSQL = {
                                 ...ratchet,
                                 deviceID: mail.sender,
-                                fingerprint: XUtils.encodeHex(AD),
+                                fingerprint: receiverFingerprint,
                                 lastUsed: new Date().toISOString(),
                                 mode: "receiver",
                                 publicKey: XUtils.encodeHex(PK),
                                 sessionID: uuid.v4(),
                                 SK: XUtils.encodeHex(SK),
                                 userID: userEntry.userID,
-                                verified: false,
+                                verified: receiverVerified,
                             };
                             await this.database.saveSession(newSession);
 
