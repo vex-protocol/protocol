@@ -244,6 +244,15 @@ export class ClientManager extends EventEmitter {
             let msg: BaseMsg;
             try {
                 [header, msg] = unpackMessage(message);
+                // msgpackr happily decodes `nil` (0xc0) and primitives; those
+                // are not message objects, and dereferencing their fields
+                // below would throw out of the listener and crash the process
+                // just like a malformed frame would. unpackMessage() types
+                // the body as BaseMsg, but at runtime it is attacker input.
+                const decodedBody: unknown = msg;
+                if (decodedBody === null || typeof decodedBody !== "object") {
+                    throw new Error("Message body is not an object.");
+                }
             } catch {
                 this.sendErr(
                     "00000000-0000-0000-0000-000000000000",

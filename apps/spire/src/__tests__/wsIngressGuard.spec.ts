@@ -107,6 +107,10 @@ describe("websocket ingress hardening", () => {
             Buffer.concat([Buffer.alloc(32), Buffer.from([0xc1])]),
             // truncated array behind a valid header
             Buffer.concat([Buffer.alloc(32), Buffer.from([0x92, 0x01])]),
+            // msgpack `nil` — decodes fine, but dereferencing it would throw
+            Buffer.concat([Buffer.alloc(32), Buffer.from([0xc0])]),
+            // a primitive body is not a message object either
+            frame(42),
             Buffer.alloc(64, 0xff),
         ];
         for (const bad of badFrames) {
@@ -125,18 +129,25 @@ describe("websocket ingress hardening", () => {
         ).toBe(true);
     });
 
-    it("rejects valid-msgpack garbage without killing the connection", () => {
+    it("rejects typeless message objects without killing the connection", () => {
         const conn = makeConn();
         makeClient(conn);
 
         const socket = conn.raw as unknown as EventEmitter;
         expect(() => {
-            socket.emit("message", frame(42));
+            socket.emit(
+                "message",
+                frame({ transmissionID: crypto.randomUUID() }),
+            );
         }).not.toThrow();
 
-        // Decodes fine but has no message type: error response, no teardown.
+        // A real message object with no type: error reply, no teardown.
         expect(conn.closed()).toBe(false);
-        expect(errorFrames(conn).length).toBeGreaterThan(0);
+        expect(
+            errorFrames(conn).some((f) =>
+                String(f["error"]).includes("Message type is required."),
+            ),
+        ).toBe(true);
     });
 
     it("fails the connection (not the process) when auth lookups reject", async () => {
