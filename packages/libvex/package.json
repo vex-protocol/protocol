@@ -90,7 +90,7 @@
         "better-sqlite3": "11.10.0",
         "eslint": "10.2.0",
         "eslint-config-prettier": "10.1.8",
-        "eslint-plugin-perfectionist": "5.8.0",
+        "eslint-plugin-perfectionist": "5.10.0",
         "fast-check": "4.6.0",
         "husky": "9.1.7",
         "lint-staged": "16.4.0",
@@ -100,7 +100,7 @@
         "type-coverage": "2.29.7",
         "typedoc": "0.28.18",
         "typescript": "catalog:",
-        "typescript-eslint": "8.58.1",
+        "typescript-eslint": "8.65.0",
         "vitest": "catalog:"
     },
     "dependencies": {
