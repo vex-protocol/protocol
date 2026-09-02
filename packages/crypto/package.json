@@ -74,7 +74,7 @@
         "@vitest/eslint-plugin": "1.6.15",
         "eslint": "10.2.0",
         "eslint-config-prettier": "10.1.8",
-        "eslint-plugin-perfectionist": "5.8.0",
+        "eslint-plugin-perfectionist": "5.10.1",
         "husky": "9.1.7",
         "lint-staged": "16.4.0",
         "prettier": "3.8.2",
@@ -83,7 +83,7 @@
         "type-coverage": "2.29.7",
         "typedoc": "0.28.18",
         "typescript": "catalog:",
-        "typescript-eslint": "8.58.1",
+        "typescript-eslint": "8.68.0",
         "vitest": "catalog:"
     },
     "directories": {
