@@ -7,8 +7,8 @@ settings:
 catalogs:
   default:
     '@simplewebauthn/server':
-      specifier: ^13.3.0
-      version: 13.3.0
+      specifier: ^13.3.2
+      version: 13.3.3
     '@types/node':
       specifier: ^25.6.0
       version: 25.6.0
@@ -93,7 +93,7 @@ importers:
         version: 0.9.7
       '@simplewebauthn/server':
         specifier: 'catalog:'
-        version: 13.3.0
+        version: 13.3.3
       '@vex-chat/crypto':
         specifier: workspace:^
         version: link:../../packages/crypto
@@ -1447,8 +1447,8 @@ packages:
   '@shikijs/vscode-textmate@10.0.2':
     resolution: {integrity: sha512-83yeghZ2xxin3Nj8z1NMd/NCuca+gsYXswywDy5bHvwlWL8tpTQmzGeUuHd9FC3E/SBEMvzJRwWEOz5gGes9Qg==}
 
-  '@simplewebauthn/server@13.3.0':
-    resolution: {integrity: sha512-MLHYFrYG8/wK2i+86XMhiecK72nMaHKKt4bo+7Q1TbuG9iGjlSdfkPWKO5ZFE/BX+ygCJ7pr8H/AJeyAj1EaTQ==}
+  '@simplewebauthn/server@13.3.3':
+    resolution: {integrity: sha512-LelX/lcy5cjc15A86i/aNxHhB5eU7dd20QsbP0VLAf9e38+SLlsnqCCyecx3xqfGofhmX05h1J9fKRYWxw+luA==}
     engines: {node: '>=20.0.0'}
 
   '@sindresorhus/is@4.6.0':
@@ -5537,7 +5537,7 @@ snapshots:
 
   '@shikijs/vscode-textmate@10.0.2': {}
 
-  '@simplewebauthn/server@13.3.0':
+  '@simplewebauthn/server@13.3.3':
     dependencies:
       '@hexagon/base64': 1.1.28
       '@levischuck/tiny-cbor': 0.2.11
