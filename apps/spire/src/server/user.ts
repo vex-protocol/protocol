@@ -5,10 +5,7 @@
  */
 
 import type { Database } from "../Database.ts";
-import type {
-    AuthenticatorTransportFuture,
-    RegistrationResponseJSON,
-} from "@simplewebauthn/server";
+import type { RegistrationResponseJSON } from "@simplewebauthn/server";
 import type { Device, DevicePayload } from "@vex-chat/types";
 
 import express from "express";
@@ -29,9 +26,11 @@ import { msgpack } from "../utils/msgpack.ts";
 import { verifyDevicePayloadPreKeySignature } from "../utils/preKeySignature.ts";
 import { spireXSignOpenAsync } from "../utils/spireXSignOpenAsync.ts";
 
-import { AppError } from "./errors.ts";
+import {
+    getPasskeyRpConfig,
+    sanitizePasskeyTransports,
+} from "./passkeyConfig.ts";
 import { censorUser, getParam, getUser } from "./utils.ts";
-import { buildAndroidApkKeyHashOrigins } from "./wellKnown.ts";
 
 import { protect } from "./index.ts";
 
@@ -92,16 +91,6 @@ const pendingPasskeyRegistrationFinishSchema = z.object({
 });
 
 const deviceEnrollments = new Map<string, DeviceEnrollmentRequest>();
-
-const KNOWN_TRANSPORTS = [
-    "ble",
-    "cable",
-    "hybrid",
-    "internal",
-    "nfc",
-    "smart-card",
-    "usb",
-] as const satisfies readonly AuthenticatorTransportFuture[];
 
 type VerifiedPendingResult =
     | { error: string; issues?: z.core.$ZodIssue[]; ok: false; status: number }
@@ -350,46 +339,6 @@ function buildApprovalChallenge(
     return XUtils.decodeUTF8(`${requestID}:${signKey.toLowerCase()}`);
 }
 
-function getRpConfig(): {
-    expectedOrigin: string[];
-    rpID: string;
-    rpName: string;
-} {
-    const rpID = process.env["SPIRE_PASSKEY_RP_ID"]?.trim();
-    const originsRaw = process.env["SPIRE_PASSKEY_ORIGINS"]?.trim();
-    if (!rpID) {
-        throw new AppError(
-            500,
-            "Passkeys are not configured on this server (SPIRE_PASSKEY_RP_ID is unset).",
-        );
-    }
-    if (!originsRaw) {
-        throw new AppError(
-            500,
-            "Passkeys are not configured on this server (SPIRE_PASSKEY_ORIGINS is unset).",
-        );
-    }
-    const explicitOrigins = originsRaw
-        .split(",")
-        .map((o) => o.trim())
-        .filter((o) => o.length > 0);
-    if (explicitOrigins.length === 0) {
-        throw new AppError(500, "SPIRE_PASSKEY_ORIGINS is empty.");
-    }
-    const expectedOrigin = Array.from(
-        new Set([...explicitOrigins, ...buildAndroidApkKeyHashOrigins()]),
-    );
-    return {
-        expectedOrigin,
-        rpID,
-        rpName: process.env["SPIRE_PASSKEY_RP_NAME"]?.trim() || "Vex",
-    };
-}
-
-function isKnownTransport(s: string): s is AuthenticatorTransportFuture {
-    return (KNOWN_TRANSPORTS as readonly string[]).includes(s);
-}
-
 function pruneDeviceEnrollmentRequests(nowMs = Date.now()): void {
     for (const [requestID, req] of deviceEnrollments.entries()) {
         if (
@@ -439,10 +388,6 @@ function requestSummary(req: DeviceEnrollmentRequest): {
             : {}),
         ...(req.error !== undefined ? { error: req.error } : {}),
     };
-}
-
-function sanitizeTransports(input: string[]): AuthenticatorTransportFuture[] {
-    return input.filter(isKnownTransport);
 }
 
 async function tryGetVerifiedPendingEnrollment(
@@ -578,7 +523,7 @@ export const getUserRouter = (
                 return;
             }
 
-            const { rpID, rpName } = getRpConfig();
+            const { rpID, rpName } = getPasskeyRpConfig();
             const options = await generateRegistrationOptions({
                 attestationType: "none",
                 authenticatorSelection: {
@@ -671,7 +616,7 @@ export const getUserRouter = (
             delete pending.passkeyRegistration;
             deviceEnrollments.set(pending.requestID, pending);
 
-            const { expectedOrigin, rpID } = getRpConfig();
+            const { expectedOrigin, rpID } = getPasskeyRpConfig();
             let verification;
             try {
                 verification = await verifyRegistrationResponse({
@@ -721,7 +666,7 @@ export const getUserRouter = (
                 credential.id,
                 XUtils.encodeHex(credential.publicKey),
                 0,
-                sanitizeTransports(credential.transports ?? []),
+                sanitizePasskeyTransports(credential.transports ?? []),
             );
             res.send(msgpack.encode(created));
         },

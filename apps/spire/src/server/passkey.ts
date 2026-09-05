@@ -7,7 +7,6 @@
 import type { Database } from "../Database.ts";
 import type {
     AuthenticationResponseJSON,
-    AuthenticatorTransportFuture,
     RegistrationResponseJSON,
 } from "@simplewebauthn/server";
 import type { Passkey } from "@vex-chat/types";
@@ -35,10 +34,12 @@ import { z } from "zod";
 import { JWT_EXPIRY_PASSKEY } from "../Spire.ts";
 import { signAuthJwt } from "../utils/authJwt.ts";
 
-import { AppError } from "./errors.ts";
+import {
+    getPasskeyRpConfig,
+    sanitizePasskeyTransports,
+} from "./passkeyConfig.ts";
 import { authLimiter } from "./rateLimit.ts";
 import { censorUser, getParam, getUser } from "./utils.ts";
-import { buildAndroidApkKeyHashOrigins } from "./wellKnown.ts";
 import { sendWireResponse } from "./wireResponse.ts";
 
 import { protect, protectAnyAuth } from "./index.ts";
@@ -195,62 +196,6 @@ function failBrowserRegistration(
     pending.status = "failed";
 }
 
-/**
- * Returns the WebAuthn relying-party config from the environment.
- *
- * - `SPIRE_PASSKEY_RP_ID` — RP ID (eTLD+1 of the user-facing host the
- *   client is loaded from, e.g. `vex.wtf` or `localhost`). Required.
- * - `SPIRE_PASSKEY_RP_NAME` — display name for prompts. Defaults to
- *   "Vex".
- * - `SPIRE_PASSKEY_ORIGINS` — comma-separated allowlist of expected
- *   client origins (e.g. `https://app.vex.wtf,
- *   http://localhost:5173`). Required: WebAuthn binds an assertion
- *   to its origin and we must check it explicitly.
- *
- * The returned `expectedOrigin` list also includes any
- * `android:apk-key-hash:<base64url>` entries derived from
- * `SPIRE_PASSKEY_ANDROID_FINGERPRINTS` (see
- * `buildAndroidApkKeyHashOrigins`). Native Android Credential
- * Manager sets `clientDataJSON.origin` to that string instead of the
- * RP host, so we accept it implicitly whenever the operator has
- * already advertised the cert via the assetlinks file.
- */
-function getRpConfig(): {
-    expectedOrigin: string[];
-    rpID: string;
-    rpName: string;
-} {
-    const rpID = process.env["SPIRE_PASSKEY_RP_ID"]?.trim();
-    const originsRaw = process.env["SPIRE_PASSKEY_ORIGINS"]?.trim();
-    if (!rpID) {
-        throw new AppError(
-            500,
-            "Passkeys are not configured on this server (SPIRE_PASSKEY_RP_ID is unset).",
-        );
-    }
-    if (!originsRaw) {
-        throw new AppError(
-            500,
-            "Passkeys are not configured on this server (SPIRE_PASSKEY_ORIGINS is unset).",
-        );
-    }
-    const explicitOrigins = originsRaw
-        .split(",")
-        .map((o) => o.trim())
-        .filter((o) => o.length > 0);
-    if (explicitOrigins.length === 0) {
-        throw new AppError(500, "SPIRE_PASSKEY_ORIGINS is empty.");
-    }
-    const expectedOrigin = Array.from(
-        new Set([...explicitOrigins, ...buildAndroidApkKeyHashOrigins()]),
-    );
-    return {
-        expectedOrigin,
-        rpID,
-        rpName: process.env["SPIRE_PASSKEY_RP_NAME"]?.trim() || "Vex",
-    };
-}
-
 function pruneAuthentications(nowMs = Date.now()): void {
     for (const [id, entry] of pendingAuthentications.entries()) {
         if (nowMs - entry.createdAt > AUTHENTICATION_TTL_MS) {
@@ -282,24 +227,6 @@ function pruneRegistrations(nowMs = Date.now()): void {
             pendingRegistrations.delete(id);
         }
     }
-}
-
-const KNOWN_TRANSPORTS = [
-    "ble",
-    "cable",
-    "hybrid",
-    "internal",
-    "nfc",
-    "smart-card",
-    "usb",
-] as const satisfies readonly AuthenticatorTransportFuture[];
-
-function isKnownTransport(s: string): s is AuthenticatorTransportFuture {
-    return (KNOWN_TRANSPORTS as readonly string[]).includes(s);
-}
-
-function sanitizeTransports(input: string[]): AuthenticatorTransportFuture[] {
-    return input.filter(isKnownTransport);
 }
 
 /**
@@ -365,7 +292,7 @@ export const getPasskeyRouter = (db: Database) => {
                 return;
             }
 
-            const { rpID, rpName } = getRpConfig();
+            const { rpID, rpName } = getPasskeyRpConfig();
             // The userID we hand to the authenticator is the account
             // userID encoded as bytes; this scopes the credential to
             // the account so re-registering on the same authenticator
@@ -467,7 +394,7 @@ export const getPasskeyRouter = (db: Database) => {
             pendingRegistrations.delete(parsed.data.requestID);
             pendingBrowserRegistrations.delete(pending.browserRequestID);
 
-            const { expectedOrigin, rpID } = getRpConfig();
+            const { expectedOrigin, rpID } = getPasskeyRpConfig();
 
             let verification;
             try {
@@ -508,7 +435,9 @@ export const getPasskeyRouter = (db: Database) => {
                 return;
             }
 
-            const transports = sanitizeTransports(credential.transports ?? []);
+            const transports = sanitizePasskeyTransports(
+                credential.transports ?? [],
+            );
 
             // Re-check the per-user cap inside the finish step in case
             // a concurrent request just consumed the last available
@@ -631,7 +560,7 @@ export const getPasskeyRouter = (db: Database) => {
             // finish and create a second credential.
             pendingRegistrations.delete(pending.registrationRequestID);
 
-            const { rpID, rpName } = getRpConfig();
+            const { rpID, rpName } = getPasskeyRpConfig();
             const options = await generateRegistrationOptions({
                 attestationType: "none",
                 authenticatorSelection: {
@@ -693,7 +622,7 @@ export const getPasskeyRouter = (db: Database) => {
                 return;
             }
 
-            const { expectedOrigin, rpID } = getRpConfig();
+            const { expectedOrigin, rpID } = getPasskeyRpConfig();
             let verification;
             try {
                 verification = await verifyRegistrationResponse({
@@ -748,7 +677,7 @@ export const getPasskeyRouter = (db: Database) => {
                 credential.id,
                 XUtils.encodeHex(credential.publicKey),
                 0,
-                sanitizeTransports(credential.transports ?? []),
+                sanitizePasskeyTransports(credential.transports ?? []),
             );
             pendingBrowserRegistrations.delete(getParam(req, "requestID"));
             sendWireResponse(req, res, created);
@@ -923,13 +852,13 @@ export const getPasskeyRouter = (db: Database) => {
                 const internal = await db.retrievePasskeyInternal(pk.passkeyID);
                 return {
                     id: internal?.credentialID ?? "",
-                    transports: pk.transports.filter(isKnownTransport),
+                    transports: sanitizePasskeyTransports(pk.transports),
                     type: "public-key" as const,
                 };
             }),
         );
 
-        const { rpID } = getRpConfig();
+        const { rpID } = getPasskeyRpConfig();
 
         const options = await generateAuthenticationOptions({
             allowCredentials: allowCredentials.filter((c) => c.id.length > 0),
@@ -1000,7 +929,7 @@ export const getPasskeyRouter = (db: Database) => {
             return;
         }
 
-        const { expectedOrigin, rpID } = getRpConfig();
+        const { expectedOrigin, rpID } = getPasskeyRpConfig();
 
         // Force `Uint8Array<ArrayBuffer>` (not `ArrayBufferLike`) so
         // simplewebauthn's strict generic accepts the buffer; the
@@ -1016,9 +945,9 @@ export const getPasskeyRouter = (db: Database) => {
                     counter: passkeyRow.signCount,
                     id: passkeyRow.credentialID,
                     publicKey: credentialPublicKey,
-                    transports: passkeyRow.transports
-                        .split(",")
-                        .filter(isKnownTransport),
+                    transports: sanitizePasskeyTransports(
+                        passkeyRow.transports.split(","),
+                    ),
                 },
                 expectedChallenge: pending.challenge,
                 expectedOrigin,
