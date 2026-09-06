@@ -128,6 +128,14 @@ jobs:
                     echo "::endgroup::"
                   done
 
+            - name: Show stack diagnostics on failure
+              if: failure()
+              shell: bash
+              working-directory: apps/spire
+              run: |
+                  docker compose ps --all
+                  docker compose logs --no-color --tail 200 spire nginx
+
             - name: Stop stack and remove volumes
               if: always()
               shell: bash
