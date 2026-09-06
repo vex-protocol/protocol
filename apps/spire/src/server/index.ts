@@ -293,11 +293,9 @@ export const msgpackParser: express.RequestHandler = (req, res, next) => {
     next();
 };
 
-const directories = ["files", "avatars", "server-icons"];
+const directories = ["files", "avatars", "emoji", "server-icons"];
 for (const dir of directories) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir);
-    }
+    fs.mkdirSync(dir, { recursive: true });
 }
 
 export const initApp = (

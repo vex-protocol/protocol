@@ -5,7 +5,8 @@ packages:
 blockExoticSubdeps: true
 
 catalog:
-    "@simplewebauthn/server": ^13.3.0
+    "@arethetypeswrong/cli": 0.18.5
+    "@simplewebauthn/server": ^13.3.2
     "@types/node": ^25.6.0
     kysely: ^0.29.2
     msgpackr: ^1.11.9
@@ -20,6 +21,8 @@ catalogMode: strict
 minimumReleaseAge: 10080
 
 minimumReleaseAgeExclude:
+    # Pinned security fix; retain the age gate for other releases.
+    - "qs@6.16.0"
     - "@vex-chat/cli"
     - "@vex-chat/crypto"
     - "@vex-chat/libvex"

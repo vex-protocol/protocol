@@ -21,7 +21,6 @@ import type {
 import type WebSocket from "ws";
 
 import { EventEmitter } from "events";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { xConcat, XUtils } from "@vex-chat/crypto";
 import { MailWSSchema, SocketAuthErrors } from "@vex-chat/types";
@@ -47,7 +46,7 @@ function emptyHeader() {
 
 // WebRTC SDP offers/answers are commonly several KB before encryption/packing.
 // Keep this well below HTTP body limits while allowing first-party call signals.
-const MAX_MSG_SIZE = 64 * 1024;
+export const MAX_CLIENT_MESSAGE_BYTES = 64 * 1024;
 
 // How many ping cycles in a row are allowed to go without a pong
 // before we declare the connection dead. With a 5s ping interval
@@ -71,6 +70,8 @@ const PING_INTERVAL_MS = 5000;
 export class ClientManager extends EventEmitter {
     private alive: boolean = true;
     private authed: boolean = false;
+    private authenticating: boolean = false;
+    private authTimer: ReturnType<typeof setTimeout> | undefined;
     private callManager: CallManager;
     private challengeID: Uint8Array = createUint8UUID();
     private conn: WebSocket;
@@ -87,6 +88,7 @@ export class ClientManager extends EventEmitter {
         headlessPushUserID?: string,
         mailNonce?: Uint8Array,
     ) => void;
+    private pingTimer: ReturnType<typeof setInterval> | undefined;
     private user: null | UserRecord;
     private userDetails: User;
 
@@ -116,6 +118,18 @@ export class ClientManager extends EventEmitter {
 
         this.initListeners();
         this.challenge();
+        // Accepted server sockets are already open; they never emit another
+        // `open` event after ClientManager is attached.
+        if (!this.failed) {
+            this.authTimer = setTimeout(() => {
+                this.fail();
+            }, TOKEN_EXPIRY);
+            this.authTimer.unref();
+            this.pingTimer = setInterval(() => {
+                this.ping();
+            }, PING_INTERVAL_MS);
+            this.pingTimer.unref();
+        }
     }
 
     public disconnect(): void {
@@ -130,7 +144,7 @@ export class ClientManager extends EventEmitter {
     }
 
     public getDeviceID(): null | string {
-        if (this.failed) {
+        if (this.failed || !this.authed) {
             return null;
         }
         return this.device?.deviceID ?? null;
@@ -173,9 +187,14 @@ export class ClientManager extends EventEmitter {
 
     private authorize(transmissionID: string) {
         this.authed = true;
+        clearTimeout(this.authTimer);
         this.sendAuthedMessage(transmissionID);
-        void this.db.markDeviceLogin(this.getDevice());
-        this.emit("authed");
+        if (!this.failed) {
+            void this.db.markDeviceLogin(this.getDevice()).catch(() => {
+                this.fail();
+            });
+            this.emit("authed");
+        }
     }
 
     private challenge() {
@@ -192,8 +211,10 @@ export class ClientManager extends EventEmitter {
         if (this.failed) {
             return;
         }
-        this.conn.close();
         this.failed = true;
+        clearTimeout(this.authTimer);
+        clearInterval(this.pingTimer);
+        this.conn.close();
         this.emit("fail");
     }
 
@@ -211,27 +232,23 @@ export class ClientManager extends EventEmitter {
     }
 
     private initListeners() {
-        this.conn.on("open", () => {
-            setTimeout(() => {
-                if (!this.authed) {
-                    this.conn.close();
-                }
-            }, TOKEN_EXPIRY);
-            void this.pingLoop();
-        });
         this.conn.on("close", () => {
             this.fail();
         });
+        this.conn.on("error", () => {
+            this.fail();
+        });
         this.conn.on("message", (message: Buffer) => {
+            if (this.failed) return;
             const size = Buffer.byteLength(message);
 
-            if (size > MAX_MSG_SIZE) {
+            if (size > MAX_CLIENT_MESSAGE_BYTES) {
                 this.sendErr(
                     "00000000-0000-0000-0000-000000000000",
                     "Message is too big. Received size " +
                         String(size) +
                         " while max size is " +
-                        String(MAX_MSG_SIZE),
+                        String(MAX_CLIENT_MESSAGE_BYTES),
                 );
                 return;
             }
@@ -393,17 +410,12 @@ export class ClientManager extends EventEmitter {
         this.send(p);
     }
 
-    private async pingLoop() {
-        while (!this.failed) {
-            this.ping();
-            await sleep(PING_INTERVAL_MS);
-        }
-    }
-
     private pong(transmissionID: string) {
         // ping is allowed before auth
         if (this.user) {
-            void this.db.markUserSeen(this.user);
+            void this.db.markUserSeen(this.user).catch(() => {
+                // Presence is best-effort and must not reject out of a listener.
+            });
         }
 
         const p = { transmissionID, type: "pong" };
@@ -453,46 +465,49 @@ export class ClientManager extends EventEmitter {
     }
 
     private async verifyResponse(msg: RespMsg) {
+        // A challenge is single-use. Ignore concurrent/replayed responses so
+        // one socket cannot trigger repeated key scans or duplicate fanout entries.
+        if (this.failed || this.authed || this.authenticating) return;
+        this.authenticating = true;
         // Runs as a `void`-ed async event handler: any rejection here (DB
         // outage, decode failure) would surface as an unhandledRejection and
         // take down the process. Fail the connection instead.
         try {
             const user = await this.db.retrieveUser(this.userDetails.userID);
-            if (user) {
-                const devices = await this.db.retrieveUserDeviceList([
-                    user.userID,
-                ]);
-                let message: null | Uint8Array = null;
-                for (const device of devices) {
-                    const verified = await spireXSignOpenAsync(
-                        msg.signed,
-                        XUtils.decodeHex(device.signKey),
-                    );
-                    if (verified) {
-                        message = verified;
-                        this.device = device;
-                    }
-                }
-                if (!message) {
-                    this.sendAuthError(SocketAuthErrors.BadSignature);
+            if (this.hasFailed()) return;
+            if (!user) {
+                this.sendAuthError(SocketAuthErrors.UserNotRegistered);
+                this.fail();
+                return;
+            }
+
+            const devices = await this.db.retrieveUserDeviceList([user.userID]);
+            if (this.hasFailed()) return;
+            for (const device of devices) {
+                const verified = await spireXSignOpenAsync(
+                    msg.signed,
+                    XUtils.decodeHex(device.signKey),
+                );
+                if (this.hasFailed()) return;
+                if (!verified) continue;
+                if (!XUtils.bytesEqual(this.challengeID, verified)) {
+                    this.sendAuthError(SocketAuthErrors.InvalidToken);
                     this.fail();
                     return;
                 }
 
-                if (XUtils.bytesEqual(this.challengeID, message)) {
-                    this.user = user;
-                    this.authorize(msg.transmissionID);
-                } else {
-                    this.sendAuthError(SocketAuthErrors.InvalidToken);
-                }
-            } else {
-                this.sendAuthError(SocketAuthErrors.UserNotRegistered);
-
-                this.fail();
+                this.device = device;
+                this.user = user;
+                this.authorize(msg.transmissionID);
+                return;
             }
+            this.sendAuthError(SocketAuthErrors.BadSignature);
+            this.fail();
         } catch {
             this.sendErr(msg.transmissionID, "Authentication failed.");
             this.fail();
+        } finally {
+            this.authenticating = false;
         }
     }
 }

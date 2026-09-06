@@ -2,8 +2,13 @@
 # This Dockerfile lives in apps/spire/ but operates on the whole workspace
 # so it can resolve `workspace:^` deps for @vex-chat/{types,crypto,libvex}.
 
+# Match .tool-versions in both stages: native addons must be built with the
+# tested Node headers. Node 24.19+ introduced an ObjectWrap cleanup regression
+# that crashes better-sqlite3 during startup (nodejs/node#65042).
+FROM node:24.14.0-alpine AS node-base
+
 # ── Build stage ──────────────────────────────────────────────────────────
-FROM node:24-alpine AS build
+FROM node-base AS build
 
 # argon2 + better-sqlite3 compile native code via node-gyp.
 RUN apk add --no-cache python3 make g++
@@ -35,7 +40,7 @@ RUN pnpm --filter @vex-chat/spire^... build
 RUN pnpm --filter @vex-chat/spire deploy --prod --legacy /out
 
 # ── Runtime stage ────────────────────────────────────────────────────────
-FROM node:24-alpine
+FROM node-base
 
 # Healthcheck: deploy/spire-container-health.sh (Node + fetch; no extra apk packages)
 RUN deluser --remove-home node \

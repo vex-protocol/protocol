@@ -438,6 +438,87 @@ describe("double ratchet helpers", () => {
         ).toThrow("Ratchet skip window exceeded");
     });
 
+    it.each([0, 1, 31, 33, 64])(
+        "rejects %i-byte DH keys in ratchet headers",
+        (length) => {
+            const wire = new Uint8Array(11 + length);
+            const view = new DataView(wire.buffer);
+            view.setUint8(0, 1);
+            view.setUint16(1, length, false);
+
+            expect(() => decodeRatchetHeader(wire)).toThrow(/32-byte DH key/);
+            expect(() =>
+                encodeRatchetHeader({
+                    dhPub: new Uint8Array(length),
+                    n: 0,
+                    pn: 0,
+                    version: 1,
+                }),
+            ).toThrow(/32-byte DH key/);
+        },
+    );
+
+    it.each([-1, 0.5, Number.NaN, Number.POSITIVE_INFINITY, 0x100000000])(
+        "rejects invalid message index %s before advancing the send chain",
+        (index) => {
+            const state = { CKs: new Uint8Array(32).fill(1), Ns: index };
+            const before = new Uint8Array(state.CKs);
+            expect(() => takeSendMessageKey(state)).toThrow(/unsigned 32-bit/);
+            expect(state.CKs).toEqual(before);
+            expect(() =>
+                encodeRatchetHeader({
+                    dhPub: new Uint8Array(32),
+                    n: index,
+                    pn: 0,
+                    version: 1,
+                }),
+            ).toThrow(/unsigned 32-bit/);
+            expect(() =>
+                encodeRatchetHeader({
+                    dhPub: new Uint8Array(32),
+                    n: 0,
+                    pn: index,
+                    version: 1,
+                }),
+            ).toThrow(/unsigned 32-bit/);
+        },
+    );
+
+    it("retains the newest skipped keys across consecutive maximum gaps", () => {
+        const chain = new Uint8Array(32).fill(1);
+        const dh = new Uint8Array(32).fill(2);
+        const sender = { CKs: chain, Ns: 0 };
+        const receiver = {
+            CKr: chain,
+            DHr: dh,
+            Nr: 0,
+            skippedKeys: {} as Record<string, string>,
+        };
+        const messages = Array.from(
+            { length: MAX_SKIP_MESSAGE_GAP * 2 + 2 },
+            () => takeSendMessageKey(sender).messageKey,
+        );
+
+        expect(
+            takeReceiveMessageKey(receiver, dh, MAX_SKIP_MESSAGE_GAP),
+        ).toEqual(messages[MAX_SKIP_MESSAGE_GAP]);
+        expect(
+            takeReceiveMessageKey(receiver, dh, MAX_SKIP_MESSAGE_GAP * 2 + 1),
+        ).toEqual(messages[MAX_SKIP_MESSAGE_GAP * 2 + 1]);
+        const prefix = XUtils.encodeHex(dh);
+        expect(Object.keys(receiver.skippedKeys)).toHaveLength(
+            MAX_SKIPPED_KEYS,
+        );
+        expect(receiver.skippedKeys[`${prefix}:0`]).toBeUndefined();
+        expect(
+            takeReceiveMessageKey(receiver, dh, MAX_SKIP_MESSAGE_GAP + 1),
+        ).toEqual(messages[MAX_SKIP_MESSAGE_GAP + 1]);
+        expect(receiver.Nr).toBe(MAX_SKIP_MESSAGE_GAP * 2 + 2);
+        expect(Object.keys(receiver.skippedKeys)).toHaveLength(
+            MAX_SKIPPED_KEYS - 1,
+        );
+    });
+
     it("sanitizes skipped-keys payload bounds and format", () => {
         const validDh = "aa".repeat(32);
         const validValue = "bb".repeat(32);
@@ -454,12 +535,15 @@ describe("double ratchet helpers", () => {
             JSON.stringify({
                 [`${validDh}:0`]: "not-hex",
                 [`${validDh}:1`]: validValue,
+                [`${validDh}:2`]: "ff",
+                [`${validDh}:4294967296`]: validValue,
+                "aa:3": validValue,
                 "bad-key-format": validValue,
             }),
         );
         expect(filtered["bad-key-format"]).toBeUndefined();
         expect(filtered[`${validDh}:0`]).toBeUndefined();
-        expect(filtered[`${validDh}:1`]).toBe(validValue);
+        expect(filtered).toEqual({ [`${validDh}:1`]: validValue });
     });
 });
 

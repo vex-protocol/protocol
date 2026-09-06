@@ -42,7 +42,7 @@ import { WebSocketServer } from "ws";
 import { z } from "zod/v4";
 
 import { CallManager } from "./CallManager.ts";
-import { ClientManager } from "./ClientManager.ts";
+import { ClientManager, MAX_CLIENT_MESSAGE_BYTES } from "./ClientManager.ts";
 import {
     Database,
     hashPasswordArgon2,
@@ -186,13 +186,6 @@ const notificationSubscribePayload = z.object({
     token: z.string().min(1).max(4096),
 });
 
-const directories = ["files", "avatars", "emoji", "server-icons"];
-for (const dir of directories) {
-    if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir);
-    }
-}
-
 const getAppVersion = (): string => {
     try {
         const raw = fs.readFileSync(
@@ -267,7 +260,7 @@ export class Spire extends EventEmitter {
     private readonly startedAt = new Date();
     private readonly version = getAppVersion();
     private wss: WebSocketServer = new WebSocketServer({
-        maxPayload: 4096,
+        maxPayload: MAX_CLIENT_MESSAGE_BYTES,
         noServer: true,
     });
 
@@ -421,6 +414,12 @@ export class Spire extends EventEmitter {
         this.wss.on("connection", (ws) => {
             const AUTH_TIMEOUT = 10_000;
 
+            // Malformed and oversized frames emit `error`, including before
+            // ClientManager exists. An unhandled socket error crashes Node.
+            ws.on("error", () => {
+                ws.close();
+            });
+
             const timer = setTimeout(() => {
                 ws.close();
             }, AUTH_TIMEOUT);
@@ -465,7 +464,7 @@ export class Spire extends EventEmitter {
                         this.removeClient(client);
                     });
 
-                    client.on("authed", () => {
+                    client.once("authed", () => {
                         this.clients.push(client);
                     });
                 } catch (_err: unknown) {

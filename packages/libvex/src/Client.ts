@@ -4922,6 +4922,12 @@ export class Client {
                                 );
                             }
                         } else if (
+                            // Cached keys from an older DH epoch must be used
+                            // without changing the current ratchet state.
+                            !Object.hasOwn(
+                                candidateSession.skippedKeys,
+                                `${XUtils.encodeHex(ratchetHeader.dhPub)}:${String(ratchetHeader.n)}`,
+                            ) &&
                             hasRemoteDhChanged(
                                 candidateSession.DHr,
                                 ratchetHeader.dhPub,

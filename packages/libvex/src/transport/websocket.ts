@@ -12,19 +12,19 @@
  */
 import type { WebSocketLike } from "./types.js";
 
+type SocketListener =
+    | (() => void)
+    | ((data: Uint8Array) => void)
+    | ((error: Error) => void);
+
 export class WebSocketAdapter implements WebSocketLike {
     onerror: ((err: Error | Event) => void) | null = null;
     get readyState() {
         return this.ws.readyState;
     }
-    private readonly errorListeners = new Map<
-        (error: Error) => void,
-        EventListener
-    >();
-    private readonly lifecycleListeners = new Map<() => void, EventListener>();
-    private readonly messageListeners = new Map<
-        (data: Uint8Array) => void,
-        EventListener
+    private readonly listeners = new Map<
+        string,
+        Map<SocketListener, EventListener[]>
     >();
 
     private readonly ws: WebSocket;
@@ -43,26 +43,16 @@ export class WebSocketAdapter implements WebSocketLike {
     off(event: "error", listener: (error: Error) => void): void;
     off(event: "message", listener: (data: Uint8Array) => void): void;
     off(event: string, listener: never): void {
-        if (event === "message") {
-            const typedListener: (data: Uint8Array) => void = listener;
-            const wrapped = this.messageListeners.get(typedListener);
-            if (wrapped) {
-                this.ws.removeEventListener(event, wrapped);
-                this.messageListeners.delete(typedListener);
+        const eventListeners = this.listeners.get(event);
+        const wrappers = eventListeners?.get(listener);
+        const wrapped = wrappers?.pop();
+        if (wrapped) {
+            this.ws.removeEventListener(event, wrapped);
+            if (wrappers?.length === 0) {
+                eventListeners?.delete(listener);
             }
-        } else if (event === "error") {
-            const typedListener: (error: Error) => void = listener;
-            const wrapped = this.errorListeners.get(typedListener);
-            if (wrapped) {
-                this.ws.removeEventListener(event, wrapped);
-                this.errorListeners.delete(typedListener);
-            }
-        } else {
-            const typedListener: () => void = listener;
-            const wrapped = this.lifecycleListeners.get(typedListener);
-            if (wrapped) {
-                this.ws.removeEventListener(event, wrapped);
-                this.lifecycleListeners.delete(typedListener);
+            if (eventListeners?.size === 0) {
+                this.listeners.delete(event);
             }
         }
     }
@@ -71,35 +61,41 @@ export class WebSocketAdapter implements WebSocketLike {
     on(event: "error", listener: (error: Error) => void): void;
     on(event: "message", listener: (data: Uint8Array) => void): void;
     on(event: string, listener: never): void {
+        let wrapped: EventListener;
         if (event === "message") {
             const typedListener: (data: Uint8Array) => void = listener;
-            const wrapped: EventListener = (ev: Event) => {
+            wrapped = (ev: Event) => {
                 if (!("data" in ev)) return;
                 const { data } = ev;
                 if (data instanceof ArrayBuffer) {
                     typedListener(new Uint8Array(data));
                 }
             };
-            this.messageListeners.set(typedListener, wrapped);
-            this.ws.addEventListener(event, wrapped);
         } else if (event === "error") {
             const typedListener: (error: Error) => void = listener;
-            const wrapped: EventListener = (ev: Event) => {
+            wrapped = (ev: Event) => {
                 typedListener(
                     ev instanceof Error ? ev : new Error("WebSocket error"),
                 );
             };
-            this.errorListeners.set(typedListener, wrapped);
-            this.ws.addEventListener(event, wrapped);
         } else {
             // "open" | "close"
             const typedListener: () => void = listener;
-            const wrapped: EventListener = () => {
+            wrapped = () => {
                 typedListener();
             };
-            this.lifecycleListeners.set(typedListener, wrapped);
-            this.ws.addEventListener(event, wrapped);
         }
+        // Keep each registration separately, as EventEmitter does. Sharing a
+        // callback across events must not overwrite another event's wrapper.
+        let eventListeners = this.listeners.get(event);
+        if (!eventListeners) {
+            eventListeners = new Map();
+            this.listeners.set(event, eventListeners);
+        }
+        const wrappers = eventListeners.get(listener) ?? [];
+        wrappers.push(wrapped);
+        eventListeners.set(listener, wrappers);
+        this.ws.addEventListener(event, wrapped);
     }
 
     /**

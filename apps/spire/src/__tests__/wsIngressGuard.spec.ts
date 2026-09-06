@@ -13,9 +13,10 @@ import { EventEmitter } from "events";
 
 import { xSignAsync, xSignKeyPair, XUtils } from "@vex-chat/crypto";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ClientManager } from "../ClientManager.ts";
+import { TOKEN_EXPIRY } from "../Spire.ts";
 import { msgpack } from "../utils/msgpack.ts";
 
 const userDetails: User = {
@@ -23,6 +24,12 @@ const userDetails: User = {
     userID: "user-a",
     username: "alice",
 };
+const clients: ClientManager[] = [];
+
+afterEach(() => {
+    for (const client of clients.splice(0)) client.disconnect();
+    vi.useRealTimers();
+});
 
 interface MockConn {
     close: () => void;
@@ -53,13 +60,15 @@ function makeClient(
         retrieveUserDeviceList: () => Promise.resolve([]),
         ...dbOverrides,
     } as unknown as Database;
-    return new ClientManager(
+    const client = new ClientManager(
         conn.raw,
         db,
         {} as CallManager,
         () => {},
         userDetails,
     );
+    clients.push(client);
+    return client;
 }
 
 /**
@@ -97,6 +106,62 @@ function makeConn(): MockConn {
 }
 
 describe("websocket ingress hardening", () => {
+    it("starts heartbeats on an already-open socket and cleans up dead clients", () => {
+        vi.useFakeTimers();
+        const conn = makeConn();
+        const client = makeClient(conn);
+        const failed = vi.fn();
+        client.on("fail", failed);
+
+        vi.advanceTimersByTime(20_000);
+
+        expect(conn.frames().filter((f) => f["type"] === "ping")).toHaveLength(
+            3,
+        );
+        expect(conn.closed()).toBe(true);
+        expect(failed).toHaveBeenCalledOnce();
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("expires an unanswered challenge even when the socket answers heartbeats", () => {
+        vi.useFakeTimers();
+        const conn = makeConn();
+        makeClient(conn);
+        for (let elapsed = 0; elapsed < TOKEN_EXPIRY; elapsed += 5000) {
+            conn.raw.emit(
+                "message",
+                frame({
+                    transmissionID: crypto.randomUUID(),
+                    type: "pong",
+                }),
+            );
+            vi.advanceTimersByTime(5000);
+        }
+        expect(conn.closed()).toBe(true);
+        expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it("contains socket errors and ignores frames after disconnect", () => {
+        const conn = makeConn();
+        const retrieveUser = vi.fn(() => Promise.resolve(null));
+        makeClient(conn, { retrieveUser });
+
+        expect(() =>
+            conn.raw.emit("error", new Error("invalid frame")),
+        ).not.toThrow();
+        conn.raw.emit(
+            "message",
+            frame({
+                signed: new Uint8Array(96),
+                transmissionID: crypto.randomUUID(),
+                type: "response",
+            }),
+        );
+
+        expect(conn.closed()).toBe(true);
+        expect(retrieveUser).not.toHaveBeenCalled();
+    });
+
     it("drops the connection on a malformed msgpack frame without throwing", () => {
         const conn = makeConn();
         makeClient(conn);
@@ -182,7 +247,8 @@ describe("websocket ingress hardening", () => {
         ).toBe(true);
     });
 
-    it("still completes the challenge-response handshake after hardening", async () => {
+    it("authenticates once even if the signed response is sent concurrently or replayed", async () => {
+        vi.useFakeTimers();
         const conn = makeConn();
         const signKeys = xSignKeyPair();
         const device: Device = {
@@ -193,9 +259,11 @@ describe("websocket ingress hardening", () => {
             owner: userDetails.userID,
             signKey: XUtils.encodeHex(signKeys.publicKey),
         };
+        const retrieveUser = vi.fn(() =>
+            Promise.resolve({ ...userDetails, passwordHash: "x" }),
+        );
         const client = makeClient(conn, {
-            retrieveUser: () =>
-                Promise.resolve({ ...userDetails, passwordHash: "x" } as never),
+            retrieveUser,
             retrieveUserDeviceList: () => Promise.resolve([device]),
         });
 
@@ -216,7 +284,52 @@ describe("websocket ingress hardening", () => {
         );
 
         const socket = conn.raw as unknown as EventEmitter;
-        socket.emit(
+        const response = frame({
+            signed,
+            transmissionID: crypto.randomUUID(),
+            type: "response",
+        });
+        socket.emit("message", response);
+        socket.emit("message", response);
+
+        await authed;
+        socket.emit("message", response);
+        expect(conn.closed()).toBe(false);
+        expect(
+            conn.frames().filter((f) => f["type"] === "authorized"),
+        ).toHaveLength(1);
+        expect(retrieveUser).toHaveBeenCalledOnce();
+        expect(client.getDeviceID()).toBe(device.deviceID);
+        expect(vi.getTimerCount()).toBe(1);
+        for (let elapsed = 0; elapsed < TOKEN_EXPIRY; elapsed += 5000) {
+            socket.emit(
+                "message",
+                frame({ transmissionID: crypto.randomUUID(), type: "pong" }),
+            );
+            vi.advanceTimersByTime(5000);
+        }
+        expect(conn.closed()).toBe(false);
+    });
+
+    it("never authenticates a disconnected client after a pending lookup resolves", async () => {
+        const conn = makeConn();
+        const keys = xSignKeyPair();
+        let resolveDevices: (devices: Device[]) => void = () => {};
+        const devices = new Promise<Device[]>((resolve) => {
+            resolveDevices = resolve;
+        });
+        const retrieveUserDeviceList = vi.fn(() => devices);
+        const client = makeClient(conn, {
+            retrieveUser: () =>
+                Promise.resolve({ ...userDetails, passwordHash: "x" }),
+            retrieveUserDeviceList,
+        });
+        const challenge = conn.frames().find((f) => f["type"] === "challenge");
+        const signed = await xSignAsync(
+            challenge?.["challenge"] as Uint8Array,
+            keys.secretKey,
+        );
+        conn.raw.emit(
             "message",
             frame({
                 signed,
@@ -224,11 +337,65 @@ describe("websocket ingress hardening", () => {
                 type: "response",
             }),
         );
+        await Promise.resolve();
+        expect(retrieveUserDeviceList).toHaveBeenCalledOnce();
+        client.disconnect();
+        resolveDevices([
+            {
+                deleted: false,
+                deviceID: "device-a",
+                lastLogin: new Date(0).toISOString(),
+                name: "desktop",
+                owner: userDetails.userID,
+                signKey: XUtils.encodeHex(keys.publicKey),
+            },
+        ]);
+        await new Promise((resolve) => {
+            setImmediate(resolve);
+        });
 
-        await authed;
-        expect(conn.closed()).toBe(false);
-        expect(conn.frames().some((f) => f["type"] === "authorized")).toBe(
-            true,
+        expect(
+            conn.frames().filter((f) => f["type"] === "authorized"),
+        ).toHaveLength(0);
+        expect(client.getDeviceID()).toBeNull();
+        expect(client.getUserID()).toBeNull();
+    });
+
+    it("does not expose a device after a valid signature of the wrong challenge", async () => {
+        const conn = makeConn();
+        const keys = xSignKeyPair();
+        const client = makeClient(conn, {
+            retrieveUser: () =>
+                Promise.resolve({ ...userDetails, passwordHash: "x" }),
+            retrieveUserDeviceList: () =>
+                Promise.resolve([
+                    {
+                        deleted: false,
+                        deviceID: "device-a",
+                        lastLogin: new Date(0).toISOString(),
+                        name: "desktop",
+                        owner: userDetails.userID,
+                        signKey: XUtils.encodeHex(keys.publicKey),
+                    },
+                ]),
+        });
+        const signed = await xSignAsync(new Uint8Array(16), keys.secretKey);
+        conn.raw.emit(
+            "message",
+            frame({
+                signed,
+                transmissionID: crypto.randomUUID(),
+                type: "response",
+            }),
         );
+        await new Promise((resolve) => {
+            setImmediate(resolve);
+        });
+
+        expect(conn.closed()).toBe(true);
+        expect(client.getDeviceID()).toBeNull();
+        expect(
+            conn.frames().filter((f) => f["type"] === "authorized"),
+        ).toHaveLength(0);
     });
 });

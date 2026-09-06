@@ -51,7 +51,7 @@
         "zod": "catalog:"
     },
     "devDependencies": {
-        "@arethetypeswrong/cli": "0.18.2",
+        "@arethetypeswrong/cli": "catalog:",
         "@asteasolutions/zod-to-openapi": "8.5.0",
         "@asyncapi/parser": "3.6.0",
         "@changesets/cli": "2.30.0",
