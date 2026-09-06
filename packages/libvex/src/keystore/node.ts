@@ -6,6 +6,7 @@
 
 import type { KeyStore, StoredCredentials } from "../types/index.js";
 
+import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 
@@ -71,8 +72,22 @@ export class NodeKeyStore implements KeyStore {
             data,
         );
         const filePath = this.filePath(creds.username);
-        fs.writeFileSync(filePath, encrypted, { mode: 0o600 });
-        fs.chmodSync(filePath, 0o600);
+        // Replace only after the encrypted file has been fully written. This
+        // preserves the previous credentials on failure and never follows a
+        // symlink at the destination when saving.
+        const temporaryPath = `${filePath}.${randomUUID()}.tmp`;
+        const descriptor = fs.openSync(temporaryPath, "wx", 0o600);
+        try {
+            try {
+                fs.writeFileSync(descriptor, encrypted);
+                fs.fsyncSync(descriptor);
+            } finally {
+                fs.closeSync(descriptor);
+            }
+            fs.renameSync(temporaryPath, filePath);
+        } finally {
+            fs.rmSync(temporaryPath, { force: true });
+        }
     }
 
     private filePath(username: string): string {

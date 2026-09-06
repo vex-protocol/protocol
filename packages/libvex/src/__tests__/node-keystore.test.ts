@@ -45,6 +45,67 @@ describe("NodeKeyStore", () => {
         );
     });
 
+    it("atomically replaces credentials without following a destination symlink", async () => {
+        const dir = makeTempDir();
+        const store = new NodeKeyStore("password", dir);
+        const target = path.join(dir, "unrelated.txt");
+        const destination = path.join(dir, "alice.vex");
+        fs.writeFileSync(target, "leave this file intact");
+        fs.symlinkSync(target, destination);
+        const credentials: StoredCredentials = {
+            deviceID: "device-id",
+            deviceKey: "ab".repeat(64),
+            username: "alice",
+        };
+
+        await store.save(credentials);
+
+        expect(fs.readFileSync(target, "utf8")).toBe("leave this file intact");
+        expect(fs.lstatSync(destination).isSymbolicLink()).toBe(false);
+        expect(fs.statSync(destination).mode & 0o777).toBe(0o600);
+        await expect(store.load("alice")).resolves.toEqual(credentials);
+        expect(fs.readdirSync(dir).sort()).toEqual([
+            "alice.vex",
+            "unrelated.txt",
+        ]);
+    });
+
+    it("cleans up temporary files if replacement fails", async () => {
+        const dir = makeTempDir();
+        const store = new NodeKeyStore("password", dir);
+        fs.mkdirSync(path.join(dir, "alice.vex"));
+
+        await expect(
+            store.save({
+                deviceID: "device-id",
+                deviceKey: "ab".repeat(64),
+                username: "alice",
+            }),
+        ).rejects.toThrow();
+
+        expect(fs.readdirSync(dir)).toEqual(["alice.vex"]);
+        expect(fs.statSync(path.join(dir, "alice.vex")).isDirectory()).toBe(
+            true,
+        );
+    });
+
+    it("replaces existing credentials with a complete new encrypted file", async () => {
+        const dir = makeTempDir();
+        const store = new NodeKeyStore("password", dir);
+        const credentials: StoredCredentials = {
+            deviceID: "device-id",
+            deviceKey: "ab".repeat(64),
+            username: "alice",
+        };
+        await store.save(credentials);
+        const updated = { ...credentials, token: "replacement-token" };
+
+        await store.save(updated);
+
+        await expect(store.load("alice")).resolves.toEqual(updated);
+        expect(fs.readdirSync(dir)).toEqual(["alice.vex"]);
+    });
+
     it("keeps usernames inside the configured directory", async () => {
         const dir = makeTempDir();
         const store = new NodeKeyStore("password", dir);

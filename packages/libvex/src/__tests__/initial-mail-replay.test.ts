@@ -33,6 +33,7 @@ import { EventEmitter } from "eventemitter3";
 import { describe, expect, it, vi } from "vitest";
 
 import { Client } from "../Client.js";
+import { encodeRatchetHeader } from "../utils/ratchet.js";
 
 import { MemoryStorage } from "./harness/memory-storage.js";
 
@@ -268,6 +269,7 @@ function makeReceiverHarness(opts: {
         sendReceipt,
         sessionHealBackoffUntil: new Map<string, number>(),
         sessionHealInFlight: new Set<string>(),
+        sessionRecords: {},
         userRecords: {},
         xKeyRing: opts.receiverRing,
     };
@@ -279,6 +281,62 @@ function makeUser(userID: string, username: string): User {
 }
 
 describe("initial mail replay guard", () => {
+    it("receives delayed mail from an earlier DH epoch without rotating the current session", async () => {
+        const f = await makeReceiverFixture();
+        const initial = await f.craft("first message");
+        await f.readMail(initial.header, initial.mail);
+        const initialSession = (await f.storage.getAllSessions())[0];
+        if (!initialSession) throw new Error("Expected an initial session.");
+        const previousDh = await xBoxKeyPairAsync();
+        const currentDh = await xBoxKeyPairAsync();
+        const messageKey = new Uint8Array(32).fill(17);
+        const skippedID = `${XUtils.encodeHex(previousDh.publicKey)}:1`;
+        const currentSession = {
+            ...initialSession,
+            CKs: "33".repeat(32),
+            DHr: XUtils.encodeHex(currentDh.publicKey),
+            Nr: 5,
+            Ns: 3,
+            PN: 2,
+            skippedKeys: JSON.stringify({
+                [skippedID]: XUtils.encodeHex(messageKey),
+            }),
+        };
+        await f.storage.saveSession(currentSession);
+        const nonce = xMakeNonce();
+        const subkeys = xMessageKeySubkeys(messageKey);
+        const mail: MailWS = {
+            ...initial.mail,
+            cipher: await xSecretboxAsync(
+                XUtils.decodeUTF8("delayed message"),
+                nonce,
+                subkeys.encryptionKey,
+            ),
+            extra: encodeRatchetHeader({
+                dhPub: previousDh.publicKey,
+                n: 1,
+                pn: 0,
+                version: 1,
+            }),
+            mailID: crypto.randomUUID(),
+            mailType: MailType.subsequent,
+            nonce,
+        };
+
+        await f.readMail(xHMAC(mail, subkeys.authenticationKey), mail);
+
+        expect(f.messages.map((message) => message.message)).toEqual([
+            "first message",
+            "delayed message",
+        ]);
+        const stored = (await f.storage.getAllSessions())[0];
+        expect(stored).toEqual({
+            ...currentSession,
+            lastUsed: expect.any(String),
+            skippedKeys: "{}",
+        });
+    });
+
     it("ignores a replayed initial mail instead of rolling back the session", async () => {
         const f = await makeReceiverFixture();
         const { header, mail } = await f.craft("hello bob");

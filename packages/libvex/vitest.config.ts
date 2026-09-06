@@ -24,6 +24,7 @@ export default defineConfig({
                         "src/__tests__/retention.test.ts",
                         "src/__tests__/storage-sqlite.test.ts",
                         "src/__tests__/verifyKeyBundle.test.ts",
+                        "src/__tests__/websocket.test.ts",
                     ],
                     name: "unit",
                     testTimeout: 10_000,

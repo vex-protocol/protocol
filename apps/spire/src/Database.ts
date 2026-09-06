@@ -1097,18 +1097,17 @@ export class Database extends EventEmitter {
     public async retrieveAffectedUsers(
         resourceID: string,
     ): Promise<UserRecord[]> {
-        const permissionList =
-            await this.retrievePermissionsByResourceID(resourceID);
-
-        const users: UserRecord[] = [];
-        for (const permission of permissionList) {
-            const user = await this.retrieveUser(permission.userID);
-            if (user) {
-                users.push(user);
-            }
-        }
-
-        return users;
+        const rows = await this.db
+            .selectFrom("users")
+            .selectAll()
+            .where("userID", "in", (eb) =>
+                eb
+                    .selectFrom("permissions")
+                    .select("userID")
+                    .where("resourceID", "=", resourceID),
+            )
+            .execute();
+        return rows.map(toUserRecord);
     }
 
     public async retrieveBillingAccountState(
@@ -1221,24 +1220,7 @@ export class Database extends EventEmitter {
         channelID: string,
     ): Promise<UserRecord[]> {
         const channel = await this.retrieveChannel(channelID);
-        if (!channel) {
-            return [];
-        }
-        const permissions: Permission[] = await this.db
-            .selectFrom("permissions")
-            .selectAll()
-            .where("resourceID", "=", channel.serverID)
-            .execute();
-
-        const groupMembers: UserRecord[] = [];
-        for (const permission of permissions) {
-            const user = await this.retrieveUser(permission.userID);
-            if (user) {
-                groupMembers.push(user);
-            }
-        }
-
-        return groupMembers;
+        return channel ? this.retrieveAffectedUsers(channel.serverID) : [];
     }
 
     public async retrieveInvite(inviteID: string): Promise<Invite | null> {
