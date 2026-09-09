@@ -61,7 +61,7 @@
         "@vex-chat/eslint-config": "workspace:*",
         "eslint": "10.2.0",
         "eslint-config-prettier": "10.1.8",
-        "eslint-plugin-perfectionist": "5.8.0",
+        "eslint-plugin-perfectionist": "5.11.0",
         "husky": "9.1.7",
         "lint-staged": "16.4.0",
         "prettier": "3.8.2",
@@ -70,7 +70,7 @@
         "tsx": "catalog:",
         "type-coverage": "2.29.7",
         "typescript": "catalog:",
-        "typescript-eslint": "8.58.1"
+        "typescript-eslint": "8.69.0"
     },
     "typeCoverage": {
         "atLeast": 100,
