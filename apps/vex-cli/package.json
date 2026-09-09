@@ -44,7 +44,7 @@
     },
     "devDependencies": {
         "@types/node": "catalog:",
-        "publint": "0.3.18"
+        "publint": "0.3.24"
     },
     "engines": {
         "node": ">=24.0.0"
