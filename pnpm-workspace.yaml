@@ -6,14 +6,14 @@ blockExoticSubdeps: true
 
 catalog:
     "@simplewebauthn/server": ^13.3.0
-    "@types/node": ^25.6.0
-    kysely: ^0.29.2
-    msgpackr: ^1.11.9
-    tsx: 4.20.6
-    typescript: 6.0.2
-    uuid: ^14.0.0
+    "@types/node": ^26.4.1
+    kysely: ^0.29.5
+    msgpackr: ^2.1.0
+    tsx: 4.23.13
+    typescript: 7.0.2
+    uuid: ^14.0.2
     vitest: 4.1.4
-    zod: ^4.3.6
+    zod: ^4.5.4
 
 catalogMode: strict
 
