@@ -12,7 +12,7 @@ catalog:
     tsx: 4.20.6
     typescript: 6.0.2
     uuid: ^14.0.0
-    vitest: 4.1.4
+    vitest: 4.1.11
     zod: ^4.3.6
 
 catalogMode: strict
